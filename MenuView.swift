@@ -15,10 +15,10 @@ struct MenuView: View {
 
             Divider()
 
-            Text("かなキー2度押し → 日本語に打ち直し")
+            Text("かなキー2度押し → 打ち間違いを打ち直し")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("英数キー2度押し → 英語に打ち直し")
+            Text("(英語↔日本語は自動判定)")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

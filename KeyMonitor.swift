@@ -67,9 +67,8 @@ class KeyMonitor {
     private var kanaFirstTapTime: TimeInterval = 0
     private var kanaTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
     private var kanaTapOverflowed = false
-    // 英数保留の状態
-    private var eisuHolding = false
-    private var eisuHoldTimer: DispatchWorkItem?
+    /// 1度目のかな押下時点で入力ソースが日本語だったか（方向判定に使う）
+    private var kanaTapWasJapanese = false
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -129,11 +128,9 @@ class KeyMonitor {
 
     // MARK: - イベント処理
 
-    // トリガー体系:
-    //   かな×2 (350ms以内) → E→J 救済。1度目は素通し（通常の切替）、2度目を飲む
-    //   英数×2 (350ms以内) → J→E 救済。英数は1度目の押下が未確定合成を確定して
-    //     しまうため、1度目を飲んで保留し、2度目が来なければ注入し直す
-    //   Caps Lock / F18 / Hyper はもう使わない（通常機能のまま）
+    // トリガー体系: かな×2 (350ms以内) の一本のみ。方向は自動判定。
+    //   1度目は素通し（通常の切替として働く）、2度目を飲んで救済。
+    //   英数 / Caps Lock / F18 / Hyper はすべて通常機能のまま
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
@@ -147,57 +144,18 @@ class KeyMonitor {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
-        // ── 英数保留中の処理 ─────────────────────────────
-        if eisuHolding {
-            // keyUp / flagsChanged ではフラッシュしない。
-            // 速いタイピングでは直前の文字の keyUp が英数押下の後に届く
-            // （ロールオーバー）ので、keyUp でフラッシュすると2度押しが
-            // 常に「新しい1度目」になってしまう（実測: 保留開始×6連発）。
-            if keyCode != eisuKeyCode && type != .keyDown {
-                return Unmanaged.passRetained(event)
-            }
-            if type == .keyDown && keyCode == eisuKeyCode {
-                // 2度目の英数 → J→E 救済
-                cancelEisuHold()
-                if buffer.isEmpty {
-                    // 直前の打鍵がない: 救済対象なし。普通に切り替えるだけ
-                    itsLog.error("英数2度目 (buffer空) → 通常切替のみ")
-                    postSyntheticKey(eisuKeyCode)
-                } else {
-                    itsLog.error("英数2度目 → J→E 救済 (buffer=\(self.buffer.count)文字 '\(self.buffer.map { $0.char }.joined(), privacy: .public)')")
-                    resetBuffer()
-                    rescueToEnglishViaF10()
-                }
-                return nil
-            }
-            if type == .keyUp && keyCode == eisuKeyCode {
-                return nil  // 保留中の英数 keyUp も飲む
-            }
-            // 別のキー押下 = 通常の切替後に打ち始めた
-            // → 英数を即時注入し、このキーは英数の後に再生する
-            itsLog.error("英数保留フラッシュ type=\(type.rawValue) keyCode=\(keyCode)")
-            cancelEisuHold()
-            postSyntheticKey(eisuKeyCode)
-            resetBuffer()
-            if type == .keyDown, let chars = unicodeChar(from: event), isBufferable(chars) {
-                buffer.append((keyCode: keyCode, char: chars))
-            }
-            if let copy = event.copy() {
-                copy.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                    copy.post(tap: .cgSessionEventTap)
-                }
-            }
-            return nil
-        }
-
         if type == .flagsChanged {
             return Unmanaged.passRetained(event)
         }
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
-        // ── かなキー: 2度押しで E→J 救済 ─────────────────
+        // ── かなキー2度押し: 打ち間違い救済（方向自動判定） ──
+        // 1度目の時点の入力ソースで方向を決める:
+        //   ABC だった → 英語モードでローマ字を打っていた → E→J
+        //   日本語だった → 日本語モードで英語を打っていた → J→E (F10)
+        // 英数キーはトリガーに使わない。ユーザーのキーボード(QMK/VIA)の
+        // tap-dance が素早い2度目を食べて OS に届かないことが実測で判明したため。
         if keyCode == kanaKeyCode {
             let now = ProcessInfo.processInfo.systemUptime
             if now - kanaFirstTapTime < doubleTapWindow {
@@ -205,24 +163,31 @@ class KeyMonitor {
                 kanaFirstTapTime = 0
                 let snapshot = kanaTapSnapshot
                 kanaTapSnapshot = []
-                if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
+                if kanaTapWasJapanese {
+                    // J→E: 未確定合成が開いていれば F10 で生ローマ字に戻す
+                    if snapshot.isEmpty {
+                        itsLog.error("かな×2 (日本語, buffer空) → 救済対象なし")
+                    } else {
+                        rescueToEnglishViaF10()
+                    }
+                } else if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
                     triggerRescueToJapanese(saved, skipSwitch: true)
                 }
                 return nil
             }
-            // 1度目: バッファを退避してから素通し（通常の日本語切替として働く）
+            // 1度目: 方向判定材料とバッファを退避してから素通し
             kanaFirstTapTime = now
+            kanaTapWasJapanese = isCurrentlyJapaneseIME()
             kanaTapSnapshot = buffer
             kanaTapOverflowed = bufferOverflowed
             resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
-        // ── 英数キー: 1度目を飲んで保留 ───────────────────
+        // 英数キー → バッファリセットのみ（通常の切替を邪魔しない）
         if keyCode == eisuKeyCode {
-            itsLog.error("英数1度目 → 保留開始 (buffer=\(self.buffer.count)文字)")
-            beginEisuHold()
-            return nil
+            resetBuffer()
+            return Unmanaged.passRetained(event)
         }
 
         if keyCode == backspaceKeyCode {
@@ -256,28 +221,6 @@ class KeyMonitor {
         }
 
         return Unmanaged.passRetained(event)
-    }
-
-    // ── 英数キーの保留 ──────────────────────────────────
-    private func beginEisuHold() {
-        eisuHolding = true
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.eisuHolding else { return }
-            // 2度目が来なかった: 通常の切替として英数を注入し直す
-            self.eisuHolding = false
-            self.eisuHoldTimer = nil
-            itsLog.error("英数保留タイムアウト → 通常切替として注入")
-            self.postSyntheticKey(self.eisuKeyCode)
-            self.resetBuffer()
-        }
-        eisuHoldTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
-    }
-
-    private func cancelEisuHold() {
-        eisuHolding = false
-        eisuHoldTimer?.cancel()
-        eisuHoldTimer = nil
     }
 
     /// バッファに溜めてよい文字か。
