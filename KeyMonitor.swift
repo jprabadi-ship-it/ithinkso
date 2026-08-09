@@ -2,19 +2,63 @@ import Cocoa
 import Carbon
 
 class KeyMonitor {
+
+    // MARK: - 調整点
+
+    /// 何文字以上で救出対象にするか。1 = 「a」→「あ」も救う
     private let rescueThreshold = 1
-    var rescueThresholdPublic: Int { rescueThreshold }
-    private let capsLockKeyCode: CGKeyCode = 57  // 標準キーボード（flagsChanged）
+    /// これを超えたら救済しない。中途半端に一部だけ打ち直すと事故になるため
+    private let maxBufferCount = 100
+    /// BS 連打の間隔。0 だと取りこぼすアプリがある
+    private let backspaceInterval = 0.008
+    /// Kotoeri に流し込む間隔。IME の変換処理を待つ必要がある
+    private let injectInterval = 0.030
+    /// IME を通さない注入の間隔。変換待ちが不要なので詰められる
+    private let injectIntervalASCII = 0.005
+    /// 救済が固まったときに強制解除するまでの時間
+    private let rescueTimeout = 6.0
+
+    // MARK: - キーコード
+
+    private let capsLockKeyCode: CGKeyCode = 57   // 標準キーボード（flagsChanged で来る）
     private let eisuKeyCode: CGKeyCode = 102      // JIS 英数キー
-    private let f18KeyCode: CGKeyCode = 79        // F18（Caps Lock→VIAリマップ）→ スマート救済
+    private let f18KeyCode: CGKeyCode = 79        // F18（Caps Lock を Karabiner でリマップ）
     private let backspaceKeyCode: CGKeyCode = 51
+    private let escapeKeyCode: CGKeyCode = 53
+    private let spaceKeyCode: CGKeyCode = 49
+    private let returnKeyCode: CGKeyCode = 36
+
+    // MARK: - 入力ソース
+
+    /// 完全一致で、この優先順に選ぶ。
+    /// 部分一致にすると "com.google.inputmethod.Japanese.Roman"（英数）まで
+    /// 当たってしまい、日本語のつもりで英数に切り替わる事故が起きる。
+    private let japaneseSourceIDs = [
+        "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese",
+        "com.google.inputmethod.Japanese.base",
+    ]
+    private let englishSourceIDs = [
+        "com.apple.keylayout.ABC",
+        "com.apple.keylayout.US",
+    ]
+
+    // MARK: - 状態
+
     private var buffer: [(keyCode: CGKeyCode, char: String)] = []
+    /// 上限を超えた記録。超えた回は救済を諦める
+    private var bufferOverflowed = false
     private var isRescuing = false
     private var hyperWasActive = false
-    // 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
+    private var watchdog: DispatchWorkItem?
+
+    /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+
+    var rescueThresholdPublic: Int { rescueThreshold }
+
+    // MARK: - 開始 / 停止
 
     func start() {
         guard eventTap == nil else { return }
@@ -24,6 +68,8 @@ class KeyMonitor {
                                    | (1 << CGEventType.flagsChanged.rawValue)
 
         let selfPtr = Unmanaged.passRetained(self).toOpaque()
+        // options: .defaultTap は抑止・改変が可能なモード。
+        // sandbox 下では ListenEvent だけでは作れず、PostEvent の許可も必要（実測）。
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -57,16 +103,22 @@ class KeyMonitor {
             eventTap = nil
             runLoopSource = nil
         }
-        buffer.removeAll()
-        isRescuing = false
+        resetBuffer()
+        endRescue()
     }
 
+    // MARK: - イベント処理
+
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // 自分が注入した合成イベントはタグで識別してそのまま通す（バッファリングしない）
+        // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
             return Unmanaged.passRetained(event)
         }
-        guard !isRescuing else { return Unmanaged.passRetained(event) }
+
+        // 救済中に打たれた実キーは捨てる。
+        // 素通しすると、注入中のキー列に実キーが割り込んで文字列が壊れる。
+        // 50文字の救済は最悪2秒以上かかるので、素通しでは確実に混入する。
+        guard !isRescuing else { return nil }
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
@@ -78,25 +130,19 @@ class KeyMonitor {
                        && flags.contains(.maskAlternate)
 
             if isHyper {
-                // 4つ全部押せた状態を記憶
                 hyperWasActive = true
             } else if hyperWasActive {
-                // 4つ全部押していた→離した瞬間に発火（より確実）
+                // 4つ全部押していた→離した瞬間に発火
                 hyperWasActive = false
-                let saved = buffer
-                let text = saved.map { $0.char }.joined()
-                buffer.removeAll()
-                if saved.count >= rescueThreshold && looksLikeRomaji(text) {
+                if let saved = takeRescuableBuffer() {
                     triggerRescue(saved: saved, toJapanese: false)
                 }
             }
 
-            // Caps Lock（US標準キーボード）→ 日本語に打ち直し
+            // Caps Lock（リマップしていない環境）→ 日本語へ打ち直し
             if keyCode == capsLockKeyCode {
-                let saved = buffer
-                let text = saved.map { $0.char }.joined()
-                if saved.count >= rescueThreshold && looksLikeRomaji(text) {
-                    triggerRescue(saved: saved)
+                if let saved = takeRescuableBuffer() {
+                    triggerRescue(saved: saved, toJapanese: true)
                     return nil
                 }
             }
@@ -105,313 +151,274 @@ class KeyMonitor {
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
-        // F18（Caps Lock）→ スマート救済（今のIMEと逆方向）
+        // F18（Caps Lock を Karabiner でリマップ）→ 今の IME と逆方向へ
         if keyCode == f18KeyCode {
-            let saved = buffer
-            let text = saved.map { $0.char }.joined()
-            buffer.removeAll()
-            if saved.count >= rescueThreshold && looksLikeRomaji(text) {
-                let toJapanese = !isCurrentlyJapaneseIME()
-                triggerRescue(saved: saved, toJapanese: toJapanese)
+            if let saved = takeRescuableBuffer() {
+                triggerRescue(saved: saved, toJapanese: !isCurrentlyJapaneseIME())
             }
             return Unmanaged.passRetained(event)
         }
 
-        // 英数キー → バッファリセットのみ（通常の英語モード切り替えを邪魔しない）
+        // 英数キー → バッファリセットのみ（通常の切り替えを邪魔しない）
         if keyCode == eisuKeyCode {
-            buffer.removeAll()
+            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
-        // Backspace
         if keyCode == backspaceKeyCode {
             if !buffer.isEmpty { buffer.removeLast() }
             return Unmanaged.passRetained(event)
         }
 
-        // Space / Enter / Escape → バッファリセット
-        if keyCode == 49 || keyCode == 36 || keyCode == 53 {
-            buffer.removeAll()
+        // Space / Return / Escape → 確定または取消なのでバッファを切る
+        if keyCode == spaceKeyCode || keyCode == returnKeyCode || keyCode == escapeKeyCode {
+            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
         // 修飾キーコンボ → バッファリセット
         let flags = event.flags
         if flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate) {
-            buffer.removeAll()
+            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
         // 通常文字
-        if let chars = unicodeChar(from: event), !chars.isEmpty,
-           chars.unicodeScalars.first?.properties.isAlphabetic == true {
-            buffer.append((keyCode: keyCode, char: chars))
+        if let chars = unicodeChar(from: event), isBufferable(chars) {
+            if buffer.count >= maxBufferCount {
+                // 溢れた。以降このバッファでは救済しない
+                bufferOverflowed = true
+            } else {
+                buffer.append((keyCode: keyCode, char: chars))
+            }
         } else if keyCode != capsLockKeyCode && keyCode != eisuKeyCode && keyCode != f18KeyCode {
-            buffer.removeAll()
+            resetBuffer()
         }
 
         return Unmanaged.passRetained(event)
     }
 
-    private func triggerRescue(saved: [(keyCode: CGKeyCode, char: String)], toJapanese: Bool = true) {
-        isRescuing = true
+    /// バッファに溜めてよい文字か。
+    /// アルファベットに加えて "-" を通す。日本語の長音「ー」は "-" で入力するため、
+    /// これを境界扱いにすると「ma-ku（マーク）」のような実文が丸ごと救済できなくなる。
+    private func isBufferable(_ s: String) -> Bool {
+        guard let first = s.unicodeScalars.first, s.unicodeScalars.count == 1 else { return false }
+        if first.properties.isAlphabetic { return true }
+        if s == "-" { return true }
+        return false
+    }
+
+    private func resetBuffer() {
         buffer.removeAll()
+        bufferOverflowed = false
+    }
+
+    /// 救済対象として取り出す。条件を満たさなければ nil を返しバッファは捨てる。
+    private func takeRescuableBuffer() -> [(keyCode: CGKeyCode, char: String)]? {
+        let saved = buffer
+        let overflowed = bufferOverflowed
+        resetBuffer()
+
+        if overflowed {
+            print("[ITS] buffer overflow (>\(maxBufferCount)) → 救済しない")
+            return nil
+        }
+        guard saved.count >= rescueThreshold else { return nil }
+        guard looksLikeRomaji(saved.map { $0.char }.joined()) else { return nil }
+        return saved
+    }
+
+    // MARK: - 救済
+
+    private func beginRescue() {
+        isRescuing = true
+        watchdog?.cancel()
+        // 非同期チェーンが途中で切れると isRescuing が true のまま固まり、
+        // 全キー入力が捨てられ続けてアプリが無言で死ぬ。必ず強制解除する。
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRescuing else { return }
+            print("[ITS] watchdog fired → 救済が固まったので強制解除")
+            self.endRescue()
+        }
+        watchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + rescueTimeout, execute: work)
+    }
+
+    private func endRescue() {
+        isRescuing = false
+        watchdog?.cancel()
+        watchdog = nil
+    }
+
+    private func triggerRescue(saved: [(keyCode: CGKeyCode, char: String)], toJapanese: Bool) {
+        beginRescue()
+        let romaji = saved.map { $0.char }.joined()
+        print("[ITS] rescue \(toJapanese ? "E→J" : "J→E"): '\(romaji)' (\(saved.count) chars)")
 
         if toJapanese {
-            // ── 英語→日本語 ──
-            // ZMKマクロ方式: 1文字ずつ30msウェイトで cgSessionEventTap に注入
-            // → Kotoeriを通る → 未確定かな（確定前）として入力される
-            let romaji = saved.map { $0.char }.joined()
-
-            // ASCII 1文字 = BS 1回で削除
-            for _ in saved {
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: backspaceKeyCode, keyDown: true)
-                let up   = CGEvent(keyboardEventSource: nil, virtualKey: backspaceKeyCode, keyDown: false)
-                down?.post(tap: .cgAnnotatedSessionEventTap)
-                up?.post(tap: .cgAnnotatedSessionEventTap)
-            }
-            print("[ITS] E→J: '\(romaji)' \(saved.count) chars deleted, switching IME...")
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self = self else { return }
-                var done = false
-                var obs: Any?
-
-                obs = DistributedNotificationCenter.default().addObserver(
-                    forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-                    object: nil, queue: .main
-                ) { [weak self] _ in
-                    guard let self = self, !done else { return }
-                    done = true
-                    if let o = obs { DistributedNotificationCenter.default().removeObserver(o) }
-                    // IME切り替え通知後 200ms 待ってから注入開始
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
-                        guard let self = self else { return }
-                        print("[ITS] E→J: IME switched (isJapanese=\(self.isCurrentlyJapaneseIME())) → slow inject start")
-                        self.injectSlowKeys(saved, index: 0)
-                    }
-                }
-
-                // タイムアウト 800ms
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    guard let self = self, !done else { return }
-                    done = true
-                    if let o = obs { DistributedNotificationCenter.default().removeObserver(o) }
-                    print("[ITS] E→J: timeout → slow inject start")
-                    self.injectSlowKeys(saved, index: 0)
-                }
-
-                self.switchToJapaneseIME()
-                print("[ITS] E→J: switchToJapaneseIME() called")
-            }
-
+            rescueToJapanese(saved)
         } else {
-            // ── 日本語→英語 ──
-            let romaji = saved.map { $0.char }.joined()
-            let kanaBsCount = romajiToMoraCount(romaji)
+            rescueToEnglish(saved)
+        }
+    }
 
-            for _ in 0..<kanaBsCount {
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: backspaceKeyCode, keyDown: true)
-                let up   = CGEvent(keyboardEventSource: nil, virtualKey: backspaceKeyCode, keyDown: false)
-                down?.post(tap: .cgAnnotatedSessionEventTap)
-                up?.post(tap: .cgAnnotatedSessionEventTap)
-            }
-
-            // クリップボードにローマ字をセット → Cmd+V でIMEを完全バイパスしてペースト
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(romaji, forType: .string)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                self?.switchToEnglishIME()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+    // ── 英語 → 日本語 ────────────────────────────────────────────────
+    // 画面には確定済みの ASCII が入っているので、文字数ぶん BS で消すしかない。
+    private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
+        postBackspaces(saved.count) { [weak self] in
+            guard let self = self else { return }
+            self.switchIME(toJapanese: true) { [weak self] in
                 guard let self = self else { return }
-                let vDown = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true)
-                let vUp   = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false)
-                vDown?.flags = .maskCommand
-                vUp?.flags   = .maskCommand
-                vDown?.post(tap: .cgAnnotatedSessionEventTap)
-                vUp?.post(tap: .cgAnnotatedSessionEventTap)
-                self.isRescuing = false
+                // keyCode のみ送って Kotoeri に変換させる。
+                // keyboardSetUnicodeString を呼ぶと「変換済み」と判断されて素通しになる。
+                self.injectKeys(saved, index: 0, interval: self.injectInterval, asLiteral: false) {
+                    self.endRescue()
+                }
             }
         }
     }
 
-    // ── ZMKマクロ方式: 1文字ずつ 30ms 間隔で cgSessionEventTap に注入 ──────────
-    // privateState ソース + syntheticUserData タグ → 自タップで再処理しない
-    // flags=0 で修飾キーなし → システムショートカット誤発火を防ぐ
-    private func injectSlowKeys(_ keys: [(keyCode: CGKeyCode, char: String)], index: Int) {
-        guard index < keys.count else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.isRescuing = false
-                print("[ITS] E→J: slow inject complete ✓")
+    // ── 日本語 → 英語 ────────────────────────────────────────────────
+    // ライブ変換が有効だと画面上は漢字かな交じりになっており、
+    // 何文字消せばよいかをローマ字から計算することが原理的にできない。
+    // Esc で未確定合成を丸ごと破棄すれば、数を数えずに済む。
+    private func rescueToEnglish(_ saved: [(keyCode: CGKeyCode, char: String)]) {
+        postSyntheticKey(escapeKeyCode)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self else { return }
+            self.switchIME(toJapanese: false) { [weak self] in
+                guard let self = self else { return }
+                // 英語レイアウトなので keyCode だけでも正しい ASCII になるが、
+                // ユニコード文字列も併せてセットして、どちらを見るアプリでも合うようにする。
+                self.injectKeys(saved, index: 0, interval: self.injectIntervalASCII, asLiteral: true) {
+                    self.endRescue()
+                }
             }
+        }
+    }
+
+    // MARK: - イベント注入
+
+    private func syntheticSource() -> CGEventSource? {
+        let src = CGEventSource(stateID: .privateState)
+        src?.userData = syntheticUserData
+        return src
+    }
+
+    private func postSyntheticKey(_ keyCode: CGKeyCode) {
+        let src = syntheticSource()
+        let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
+        let up   = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
+        down?.flags = CGEventFlags(rawValue: 0)
+        up?.flags   = CGEventFlags(rawValue: 0)
+        down?.post(tap: .cgAnnotatedSessionEventTap)
+        up?.post(tap: .cgAnnotatedSessionEventTap)
+    }
+
+    /// BS を間隔をあけて連打する。まとめて撃つと取りこぼすアプリがある。
+    private func postBackspaces(_ count: Int, done: @escaping () -> Void) {
+        guard count > 0 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: done)
+            return
+        }
+        postSyntheticKey(backspaceKeyCode)
+        DispatchQueue.main.asyncAfter(deadline: .now() + backspaceInterval) { [weak self] in
+            self?.postBackspaces(count - 1, done: done)
+        }
+    }
+
+    private func injectKeys(_ keys: [(keyCode: CGKeyCode, char: String)],
+                            index: Int,
+                            interval: TimeInterval,
+                            asLiteral: Bool,
+                            done: @escaping () -> Void) {
+        guard index < keys.count else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: done)
             return
         }
         let entry = keys[index]
-        let src = CGEventSource(stateID: .privateState)
-        src?.userData = syntheticUserData
-
+        let src = syntheticSource()
         let down = CGEvent(keyboardEventSource: src, virtualKey: entry.keyCode, keyDown: true)
         let up   = CGEvent(keyboardEventSource: src, virtualKey: entry.keyCode, keyDown: false)
-        // 修飾キーなし: システムショートカット誤発火を防ぐ
+        // 修飾キーなし。システムショートカットの誤発火を防ぐ
         down?.flags = CGEventFlags(rawValue: 0)
         up?.flags   = CGEventFlags(rawValue: 0)
-        // ※ keyboardSetUnicodeString は呼ばない
-        //   unicode文字列を事前セットするとKotoeriが「変換済み」と判断してスキップする
-        //   キーコードのみを渡してKotoeriに変換させる
 
-        // cgSessionEventTap = Kotoeri処理「前」→ ローマ字がKotoeriを通って未確定かなになる
+        if asLiteral {
+            var units = Array(entry.char.utf16)
+            down?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            up?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        }
+
         down?.post(tap: .cgSessionEventTap)
         up?.post(tap: .cgSessionEventTap)
-        print("[ITS] E→J: [\(entry.char)] keyCode=\(entry.keyCode) posted (\(index+1)/\(keys.count))")
 
-        // ZMK 標準の 30ms ウェイト
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.030) { [weak self] in
-            self?.injectSlowKeys(keys, index: index + 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+            self?.injectKeys(keys, index: index + 1, interval: interval, asLiteral: asLiteral, done: done)
         }
     }
 
-    // ── Kotoeri composition の表示単位数を数える（= 必要な BS 回数）──────────────
-    // 完全なかな列（sha→しゃ、kya→きゃ 等）は 1 単位
-    // 未完了のローマ字文字（末尾の f, t 等）は 1 文字ずつ 1 単位
-    // 例: "shift" → し(1) + f(1) + t(1) = 3
-    //     "sha"   → しゃ(1) = 1
-    //     "kannpekidesune" → か+ん+ぺ+き+で+す+ね = 7
-    private func romajiToMoraCount(_ romaji: String) -> Int {
-        let s = romaji.lowercased()
-        var count = 0
-        var i = s.startIndex
+    // MARK: - 入力ソース
 
-        while i < s.endIndex {
-            let next = s.index(after: i)
-
-            // 促音: 同じ子音が連続（n・母音除外）
-            if next < s.endIndex,
-               s[i] == s[next],
-               !"aeiouy".contains(s[i]),
-               s[i] != "n" {
-                count += 1  // っ = 1 単位
-                i = next
-                continue
-            }
-
-            // 'n' 処理
-            if s[i] == "n" {
-                if next == s.endIndex { count += 1; i = next; continue }
-                let nc = s[next]
-                if nc == "n" { count += 1; i = s.index(after: next); continue }
-                if !"aeiouy".contains(nc) { count += 1; i = next; continue }
-                // na ni nu ne no nyu 等 → テーブルへ
-            }
-
-            let rem = String(s[i...])
-            // 3文字テーブル（sha, chi, kya 等）→ 1 単位
-            if rem.count >= 3 && moraTable3.contains(String(rem.prefix(3))) {
-                count += 1
-                i = s.index(i, offsetBy: 3)
-                continue
-            }
-            // 2文字テーブル（ka, si 等）→ 1 単位
-            if rem.count >= 2 && moraTable2.contains(String(rem.prefix(2))) {
-                count += 1
-                i = s.index(i, offsetBy: 2)
-                continue
-            }
-            // 母音単独 → 1 単位
-            if "aeiou".contains(s[i]) {
-                count += 1
-                i = next
-                continue
-            }
-            // 未完了文字（末尾の子音など）→ 1 単位ずつ
-            count += 1
-            i = next
+    private func keyboardSources() -> [TISInputSource] {
+        // キーボード系だけに絞る。絞らないと PressAndHold 等が混ざる
+        let filter = [kTISPropertyInputSourceCategory: kTISCategoryKeyboardInputSource] as CFDictionary
+        guard let list = TISCreateInputSourceList(filter, false)?.takeRetainedValue() as? [TISInputSource] else {
+            return []
         }
-        return max(count, 1)
+        return list
     }
 
-    // Kotoeri が認識するローマ字→かな の入力パターン（値不要、キーのみ）
-    private let moraTable3: Set<String> = [
-        "sha", "shi", "shu", "she", "sho",
-        "chi", "cha", "chu", "che", "cho",
-        "tsu", "thi", "tha", "thu", "tho",
-        "kya", "kyi", "kyu", "kye", "kyo",
-        "nya", "nyi", "nyu", "nye", "nyo",
-        "mya", "myi", "myu", "mye", "myo",
-        "rya", "ryi", "ryu", "rye", "ryo",
-        "hya", "hyi", "hyu", "hye", "hyo",
-        "bya", "byi", "byu", "bye", "byo",
-        "pya", "pyi", "pyu", "pye", "pyo",
-        "gya", "gyi", "gyu", "gye", "gyo",
-        "dya", "dyi", "dyu", "dye", "dyo",
-        "zya", "zyi", "zyu", "zye", "zyo",
-        "sya", "syi", "syu", "sye", "syo",
-        "tya", "tyi", "tyu", "tye", "tyo",
-        "whi", "whe", "who", "dhi", "dhu",
-    ]
+    /// IME を切り替え、切替完了通知を待ってから続きを実行する
+    private func switchIME(toJapanese: Bool, then: @escaping () -> Void) {
+        let ids = toJapanese ? japaneseSourceIDs : englishSourceIDs
+        let sources = keyboardSources()
 
-    private let moraTable2: Set<String> = [
-        "ka", "ki", "ku", "ke", "ko",
-        "sa", "si", "su", "se", "so",
-        "ta", "ti", "tu", "te", "to",
-        "na", "ni", "nu", "ne", "no",
-        "ha", "hi", "hu", "he", "ho",
-        "ma", "mi", "mu", "me", "mo",
-        "ya", "yu", "yo",
-        "ra", "ri", "ru", "re", "ro",
-        "wa", "wi", "we", "wo",
-        "ga", "gi", "gu", "ge", "go",
-        "za", "zi", "zu", "ze", "zo",
-        "da", "di", "du", "de", "do",
-        "ba", "bi", "bu", "be", "bo",
-        "pa", "pi", "pu", "pe", "po",
-        "fa", "fi", "fu", "fe", "fo",
-        "ja", "ji", "ju", "je", "jo",
-        "xa", "xi", "xu", "xe", "xo",
-    ]
+        var done = false
+        var observer: Any?
+        let finish: () -> Void = {
+            guard !done else { return }
+            done = true
+            if let o = observer { DistributedNotificationCenter.default().removeObserver(o) }
+            // 切替直後は IME がまだ受け入れ態勢にないことがあるので少し待つ
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: then)
+        }
+
+        observer = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
+            object: nil, queue: .main
+        ) { _ in finish() }
+
+        // 通知が来ないことがあるのでタイムアウトを必ず張る
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { finish() }
+
+        for id in ids {
+            if let source = sources.first(where: { inputSourceID($0) == id }) {
+                TISSelectInputSource(source)
+                return
+            }
+        }
+        print("[ITS] 切替先の入力ソースが見つからない: \(ids)")
+    }
 
     private func isCurrentlyJapaneseIME() -> Bool {
-        // kTISCategoryKeyboardInputSource でキーボード系のみに絞る（PressAndHold等を除外）
-        let filter = [kTISPropertyInputSourceCategory: kTISCategoryKeyboardInputSource] as CFDictionary
-        let sources = TISCreateInputSourceList(filter, false).takeRetainedValue() as! [TISInputSource]
-        for source in sources {
+        for source in keyboardSources() {
             guard let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceIsSelected) else { continue }
             let isSelected = Unmanaged<CFBoolean>.fromOpaque(ptr).takeUnretainedValue()
             guard CFBooleanGetValue(isSelected) else { continue }
             guard let id = inputSourceID(source) else { continue }
-            if id.contains("Japanese") || id.contains("Kotoeri") {
-                return true
-            }
+            if id.contains("Japanese") || id.contains("Kotoeri") { return true }
         }
         return false
-    }
-
-    private func switchToJapaneseIME() {
-        let inputSources = TISCreateInputSourceList(nil, false).takeRetainedValue() as! [TISInputSource]
-        for source in inputSources {
-            if let id = inputSourceID(source), id.contains("Hiragana") || id.contains("Japanese") {
-                TISSelectInputSource(source)
-                return
-            }
-        }
-    }
-
-    private func switchToEnglishIME() {
-        let inputSources = TISCreateInputSourceList(nil, false).takeRetainedValue() as! [TISInputSource]
-        for source in inputSources {
-            if let id = inputSourceID(source),
-               id.contains("ABC") || id == "com.apple.keylayout.US" {
-                TISSelectInputSource(source)
-                return
-            }
-        }
     }
 
     private func inputSourceID(_ source: TISInputSource) -> String? {
         guard let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
         return Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
     }
+
+    // MARK: - 判定
 
     private func unicodeChar(from event: CGEvent) -> String? {
         var length = 0
@@ -423,12 +430,12 @@ class KeyMonitor {
         return s.isEmpty ? nil : s
     }
 
+    /// ローマ字らしいか。"-"（長音）を許容するため isLetter だけでは判定できない。
     private func looksLikeRomaji(_ s: String) -> Bool {
         guard !s.isEmpty else { return false }
         let lower = s.lowercased()
         let hasVowel = lower.contains(where: { "aeiou".contains($0) })
-        let allAlpha = lower.allSatisfy({ $0.isLetter })
-        let noDigits = !lower.contains(where: { $0.isNumber })
-        return hasVowel && allAlpha && noDigits
+        let allValid = lower.allSatisfy { $0.isLetter || $0 == "-" }
+        return hasVowel && allValid
     }
 }

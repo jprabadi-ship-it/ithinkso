@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CoreGraphics
 import ServiceManagement
 
 @MainActor
@@ -11,7 +12,8 @@ class AppState: ObservableObject {
         }
     }
 
-    @Published var hasAccessibilityPermission: Bool = false
+    /// 入力監視(ListenEvent) と イベント送出(PostEvent) の両方が揃っているか
+    @Published var hasInputPermission: Bool = false
 
     private var isUpdatingLaunchAtLogin = false
     @Published var launchAtLogin: Bool = false {
@@ -40,40 +42,48 @@ class AppState: ObservableObject {
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refreshPermissionStatus()
 
-        // Accessibility が既に許可されていれば即スタート
-        if hasAccessibilityPermission && isEnabled {
+        if hasInputPermission && isEnabled {
             keyMonitor.start()
         }
     }
 
+    // App Sandbox 下では AXIsProcessTrusted は常に false を返すため使えない。
+    // CGEventTap は ListenEvent、CGEvent.post は PostEvent という別の TCC サービスで、
+    // どちらも sandbox 互換。さらに抑止つきタップ（.defaultTap）には
+    // ListenEvent だけでなく PostEvent も必要（実測で確認済み）。
     func refreshPermissionStatus() {
-        let wasTrusted = hasAccessibilityPermission
-        hasAccessibilityPermission = AXIsProcessTrusted()
-        // 権限が新たに付与されたら即スタート
-        if hasAccessibilityPermission && !wasTrusted && isEnabled {
+        let wasGranted = hasInputPermission
+        hasInputPermission = CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
+        if hasInputPermission && !wasGranted && isEnabled {
             keyMonitor.start()
         }
     }
 
-    /// システム環境設定のアクセシビリティ画面を開いてポーリング開始
-    func requestAccessibilityPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
+    func requestInputPermission() {
+        if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
+        if !CGPreflightPostEventAccess()   { _ = CGRequestPostEventAccess() }
         startPollingForPermission()
     }
 
     private func startPollingForPermission() {
         permissionTimer?.invalidate()
-        // 1秒ごとに権限チェック。付与されたら自動で start() → タイマー停止
+        // 権限は System 設定で付与されるので、こちらからは検知できない。1秒ごとに見る。
+        // ただし付与してもプロセス再起動まで反映されない場合がある。
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             Task { @MainActor [weak self] in
                 guard let self else { timer.invalidate(); return }
                 self.refreshPermissionStatus()
-                if self.hasAccessibilityPermission {
+                if self.hasInputPermission {
                     timer.invalidate()
                     self.permissionTimer = nil
                 }
             }
         }
+    }
+
+    /// 権限画面を開く。付与後に再起動が要るケースがあるため導線として用意する
+    func openPrivacySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
+        NSWorkspace.shared.open(url)
     }
 }

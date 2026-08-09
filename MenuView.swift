@@ -5,7 +5,6 @@ struct MenuView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Enable/Disable toggle
             Button(action: { appState.isEnabled.toggle() }) {
                 HStack {
                     Image(systemName: appState.isEnabled ? "checkmark" : "")
@@ -16,7 +15,6 @@ struct MenuView: View {
 
             Divider()
 
-            // Status info
             Text("\(appState.keyMonitor.rescueThresholdPublic)文字以上のローマ字入力時:")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -26,7 +24,6 @@ struct MenuView: View {
 
             Divider()
 
-            // Launch at login toggle
             Button(action: { appState.launchAtLogin.toggle() }) {
                 HStack {
                     Image(systemName: appState.launchAtLogin ? "checkmark" : "")
@@ -37,14 +34,15 @@ struct MenuView: View {
 
             Divider()
 
-            // Accessibility permission
-            if !appState.hasAccessibilityPermission {
-                Button("アクセシビリティ権限をリクエスト") {
-                    appState.requestAccessibilityPermission()
+            if !appState.hasInputPermission {
+                Button("入力監視・イベント送出の権限をリクエスト") {
+                    appState.requestInputPermission()
+                }
+                Button("プライバシー設定を開く") {
+                    appState.openPrivacySettings()
                 }
             }
 
-            // Quit
             Button("終了") {
                 NSApplication.shared.terminate(nil)
             }
