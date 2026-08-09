@@ -11,6 +11,7 @@
 		AA000000000000000001004A /* MenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000001003A /* MenuView.swift */; };
 		AA000000000000000001006A /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000001005A /* AppState.swift */; };
 		AA000000000000000001008A /* KeyMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000001007A /* KeyMonitor.swift */; };
+		AA000000000000000001012A /* StoreManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000001011A /* StoreManager.swift */; };
 		AA00000000000000000100AA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000001009A /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -19,6 +20,7 @@
 		AA000000000000000001003A /* MenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuView.swift; sourceTree = "<group>"; };
 		AA000000000000000001005A /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		AA000000000000000001007A /* KeyMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyMonitor.swift; sourceTree = "<group>"; };
+		AA000000000000000001011A /* StoreManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreManager.swift; sourceTree = "<group>"; };
 		AA000000000000000001009A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = IThinkSo/Assets.xcassets; sourceTree = "<group>"; };
 		AA00000000000000000100BA /* IThinkSo.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = IThinkSo/IThinkSo.entitlements; sourceTree = "<group>"; };
 		AA00000000000000000100CA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = IThinkSo/Info.plist; sourceTree = "<group>"; };
@@ -59,6 +61,7 @@
 				AA000000000000000001003A /* MenuView.swift */,
 				AA000000000000000001005A /* AppState.swift */,
 				AA000000000000000001007A /* KeyMonitor.swift */,
+				AA000000000000000001011A /* StoreManager.swift */,
 				AA000000000000000001009A /* Assets.xcassets */,
 				AA00000000000000000100BA /* IThinkSo.entitlements */,
 				AA00000000000000000100CA /* Info.plist */,
@@ -139,6 +142,7 @@
 				AA000000000000000001004A /* MenuView.swift in Sources */,
 				AA000000000000000001006A /* AppState.swift in Sources */,
 				AA000000000000000001008A /* KeyMonitor.swift in Sources */,
+				AA000000000000000001012A /* StoreManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

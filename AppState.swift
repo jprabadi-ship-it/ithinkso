@@ -9,7 +9,7 @@ class AppState: ObservableObject {
 
     @Published var isEnabled: Bool = true {
         didSet {
-            isEnabled ? keyMonitor.start() : keyMonitor.stop()
+            (isEnabled && store.isEntitled) ? keyMonitor.start() : keyMonitor.stop()
         }
     }
 
@@ -37,13 +37,19 @@ class AppState: ObservableObject {
     }
 
     let keyMonitor = KeyMonitor()
+    let store = StoreManager()
     private var permissionTimer: Timer?
 
     init() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refreshPermissionStatus()
 
-        if hasInputPermission && isEnabled {
+        // トライアル失効・購入で機能を止める/再開する
+        store.onEntitlementChange = { [weak self] in
+            self?.applyEntitlementState()
+        }
+
+        if canRun {
             keyMonitor.start()
         }
 
@@ -61,10 +67,17 @@ class AppState: ObservableObject {
     // CGEventTap は ListenEvent、CGEvent.post は PostEvent という別の TCC サービスで、
     // どちらも sandbox 互換。さらに抑止つきタップ（.defaultTap）には
     // ListenEvent だけでなく PostEvent も必要（実測で確認済み）。
+    /// 機能を動かしてよい状態か（権限 + 有効化 + ライセンス）
+    var canRun: Bool { hasInputPermission && isEnabled && store.isEntitled }
+
+    private func applyEntitlementState() {
+        canRun ? keyMonitor.start() : keyMonitor.stop()
+    }
+
     func refreshPermissionStatus() {
         let wasGranted = hasInputPermission
         hasInputPermission = CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
-        if hasInputPermission && !wasGranted && isEnabled {
+        if hasInputPermission && !wasGranted && canRun {
             keyMonitor.start()
         }
     }

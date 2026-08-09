@@ -34,6 +34,31 @@ struct MenuView: View {
 
             Divider()
 
+            // ライセンス状態
+            if appState.store.isPurchased {
+                Text("購入済み — ありがとうございます")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                if appState.store.trialDaysRemaining > 0 {
+                    Text("無料トライアル 残り\(appState.store.trialDaysRemaining)日")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("トライアル終了 — 機能は停止中です")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                Button("購入して使い続ける (\(appState.store.displayPrice))") {
+                    appState.store.purchase()
+                }
+                Button("購入を復元") {
+                    appState.store.restore()
+                }
+            }
+
+            Divider()
+
             if !appState.hasInputPermission {
                 Button("入力監視・イベント送出の権限をリクエスト") {
                     appState.requestInputPermission()
