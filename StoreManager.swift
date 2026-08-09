@@ -44,6 +44,13 @@ final class StoreManager: ObservableObject {
 
     init() {
         let ud = UserDefaults.standard
+        // sandbox コンテナは外部から defaults write できない（EPERM）ため、
+        // 環境変数付きで一度起動するとアプリ自身がフラグを永続化する。
+        //   設定: ITS_SET_DEV=1 で起動 / 解除: ITS_SET_DEV=0 で起動
+        if let v = ProcessInfo.processInfo.environment["ITS_SET_DEV"] {
+            if v == "1" { ud.set("rabadi-dev", forKey: "ITSLicenseOverride") }
+            else { ud.removeObject(forKey: "ITSLicenseOverride") }
+        }
         if ud.object(forKey: firstLaunchKey) == nil {
             ud.set(Date(), forKey: firstLaunchKey)
         }
