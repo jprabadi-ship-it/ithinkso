@@ -21,8 +21,17 @@ final class StoreManager: ObservableObject {
     @Published private(set) var trialDaysRemaining = StoreManager.trialDays
     @Published private(set) var product: Product?
 
-    /// 機能を使ってよい状態か（購入済み or トライアル中）
-    var isEntitled: Bool { isPurchased || trialDaysRemaining > 0 }
+    /// 開発機で購入済み扱いにするフラグ。
+    /// 設定:   defaults write com.ithinkso.app ITSLicenseOverride "rabadi-dev"
+    /// 解除:   defaults delete com.ithinkso.app ITSLicenseOverride
+    /// クライアント側の判定はどのみち改変可能なので、これは利便性の仕掛けであって
+    /// 保護機構ではない（トライアル起点の UserDefaults と同じ割り切り）
+    var isDevUnlocked: Bool {
+        UserDefaults.standard.string(forKey: "ITSLicenseOverride") == "rabadi-dev"
+    }
+
+    /// 機能を使ってよい状態か（開発フラグ or 購入済み or トライアル中）
+    var isEntitled: Bool { isDevUnlocked || isPurchased || trialDaysRemaining > 0 }
 
     var displayPrice: String { product?.displayPrice ?? Self.fallbackPrice }
 

@@ -35,7 +35,11 @@ struct MenuView: View {
             Divider()
 
             // ライセンス状態
-            if appState.store.isPurchased {
+            if appState.store.isDevUnlocked {
+                Text("開発モード（購入済み扱い）")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if appState.store.isPurchased {
                 Text("購入済み — ありがとうございます")
                     .font(.caption)
                     .foregroundColor(.secondary)
