@@ -286,25 +286,76 @@ class KeyMonitor {
 
     // ── 英語 → 日本語 ────────────────────────────────────────────────
     // 画面には確定済みの ASCII が入っているので、文字数ぶん BS で消すしかない。
+    // 先に IME を切り替えてから BS を撃つ（BS 時間が切替の追随待ちを兼ねる）。
     //
-    // 順序が重要: 先に IME を切り替えてから BS を撃つ。
-    // TISCopyCurrentKeyboardInputSource() が返すのはシステム全体の入力ソースで、
-    // 実際に文字を受け取るアプリ側の入力コンテキストはそれに遅れて追随する。
-    // 切替直後に注入すると、システム上は日本語なのにアプリはまだ英語で、
-    // ローマ字が ASCII のまま入ってしまう。
-    // BS の所要時間（37文字で約470ms）がそのまま追随待ちになるので、
-    // この順序なら待ち時間を足さずに済む。
+    // 注入は区間ごとに行う:
+    // - 日本語区間: keyCode 注入で Kotoeri に変換させる
+    // - 英語区間:   ユニコード literal 注入で Kotoeri を素通しさせる
+    // - 日本語区間の直後に英語区間が来る場合は Return で合成を確定する。
+    //   確定しないと、literal が未確定合成と衝突する上、
+    //   ライブ変換の「解析不能なら全体を生 ASCII に戻す」挙動に巻き込まれる。
+    // - 末尾の日本語区間は確定しない（ユーザーが変換を続けられるように）
     private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
+        let segs = Self.segment(saved.map { $0.char })
+        let desc = segs.map { seg -> String in
+            let t = saved[seg.range].map { $0.char }.joined()
+            return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
+        }.joined()
+        itsLog.error("区間分割: \(desc, privacy: .public)")
+
         switchIME(toJapanese: true) { [weak self] in
             guard let self = self else { return }
             self.postBackspaces(saved.count) {
-                // keyCode のみ送って Kotoeri に変換させる。
-                // keyboardSetUnicodeString を呼ぶと「変換済み」と判断されて素通しになる。
-                self.injectKeys(saved, index: 0, interval: self.injectInterval, asLiteral: false) {
-                    self.endRescue()
-                }
+                self.injectSegments(saved, segs, 0)
             }
         }
+    }
+
+    private func injectSegments(_ saved: [(keyCode: CGKeyCode, char: String)],
+                                _ segs: [Segment], _ idx: Int) {
+        guard idx < segs.count else {
+            endRescue()
+            return
+        }
+        let seg = segs[idx]
+        let keys = Array(saved[seg.range])
+        let interval = seg.isEnglish ? injectIntervalASCII : injectInterval
+        injectKeys(keys, index: 0, interval: interval, asLiteral: seg.isEnglish) { [weak self] in
+            guard let self = self else { return }
+            let isLast = idx == segs.count - 1
+            if !seg.isEnglish && !isLast {
+                // 次は英語区間（統合済みなので日本語が連続することはない）
+                // → Return で合成を確定してから literal を流す
+                self.postSyntheticKey(self.returnKeyCode)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self.injectSegments(saved, segs, idx + 1)
+                }
+            } else {
+                self.injectSegments(saved, segs, idx + 1)
+            }
+        }
+    }
+
+    // MARK: - テストフック（SelfTest から実運用フローを駆動する）
+
+    /// ANSI 配列の keyCode（テスト用）
+    static let asciiKeyMap: [Character: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+        "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+        "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37,
+        "j": 38, "k": 40, "n": 45, "m": 46, "-": 27,
+    ]
+
+    /// 文字列から buffer 相当を組み立てて E→J 救済を実行する。
+    /// 前面アプリに対して BS→区間注入まで本番と同じ経路を通る
+    func testRescueToJapanese(_ text: String) {
+        let saved = text.compactMap { ch -> (keyCode: CGKeyCode, char: String)? in
+            guard let kc = Self.asciiKeyMap[ch] else { return nil }
+            return (keyCode: kc, char: String(ch))
+        }
+        beginRescue()
+        itsLog.error("testRescue E→J '\(text, privacy: .public)' \(saved.count)文字")
+        rescueToJapanese(saved)
     }
 
     // ── 日本語 → 英語 ────────────────────────────────────────────────
@@ -458,6 +509,217 @@ class KeyMonitor {
         guard let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
         return Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
     }
+
+    // MARK: - 区間分割（日本語 / 英語）
+    //
+    // 実測で判明した Kotoeri ライブ変換の挙動:
+    // 合成に「日本語として解析できない列」(check の ck 等) が混ざると、
+    // 合成全体または以降を生 ASCII に戻してしまう。
+    // → IME に投げる前に自前で日本語/英語の区間に割り、
+    //   日本語区間だけを Kotoeri に食わせる必要がある。
+
+    struct Segment {
+        let range: Range<Int>
+        let isEnglish: Bool
+    }
+
+    /// モーラ分解に失敗した位置を英語のアンカーとし、アンカーを含む
+    /// 最長の既知英単語まで区間を広げる（"check" の che が チェ に
+    /// 食われた後で ck が余る、を防ぐ）。辞書に無ければ失敗クラスタのみ。
+    /// 迷ったらローマ字（日本語）に倒す: 分解できる列は辞書を引かない。
+    /// そのため name/made 等の「ローマ字としても読める英単語」は日本語になる。
+    static func segment(_ text: [String]) -> [Segment] {
+        let chars = text.map { Character($0.lowercased()) }
+        let n = chars.count
+        var result: [Segment] = []
+        var jaStart = 0
+        var i = 0
+
+        while i < n {
+            if let len = moraLength(chars, i) {
+                i += len
+                continue
+            }
+            // 分解失敗 → 英語区間を決める
+            var engRange: Range<Int>
+            if let word = longestDictionaryWord(chars, containing: i, notBefore: jaStart) {
+                engRange = word
+            } else {
+                // 辞書に無い: 連続する分解不能文字のみを英語扱い
+                var end = i + 1
+                while end < n, chars[end].isLetter, moraLength(chars, end) == nil {
+                    end += 1
+                }
+                engRange = i..<end
+            }
+            if engRange.lowerBound > jaStart {
+                result.append(Segment(range: jaStart..<engRange.lowerBound, isEnglish: false))
+            }
+            result.append(Segment(range: engRange, isEnglish: true))
+            i = engRange.upperBound
+            jaStart = engRange.upperBound
+        }
+        if jaStart < n {
+            result.append(Segment(range: jaStart..<n, isEnglish: false))
+        }
+        // 隣接する英語区間を統合
+        var merged: [Segment] = []
+        for seg in result {
+            if let last = merged.last, last.isEnglish == seg.isEnglish,
+               last.range.upperBound == seg.range.lowerBound {
+                merged[merged.count - 1] = Segment(range: last.range.lowerBound..<seg.range.upperBound,
+                                                   isEnglish: seg.isEnglish)
+            } else {
+                merged.append(seg)
+            }
+        }
+        return merged
+    }
+
+    /// 位置 pos のモーラ長を返す。分解できなければ nil
+    private static func moraLength(_ s: [Character], _ pos: Int) -> Int? {
+        let c = s[pos]
+        if c == "-" { return 1 }                     // 長音 ー
+        if "aeiou".contains(c) { return 1 }          // 母音単独
+        guard c.isLetter else { return nil }
+        // 促音: 同じ子音の連続（n と母音を除く）→ っ が1単位
+        if pos + 1 < s.count, s[pos] == s[pos + 1], !"aeioun".contains(c) {
+            return 1
+        }
+        // ん の処理
+        if c == "n" {
+            if pos + 1 >= s.count { return 1 }
+            let nc = s[pos + 1]
+            if nc == "n" { return 2 }                // nn = ん
+            if !"aeiouy".contains(nc) { return 1 }   // 子音前の ん
+            // na ni nu ... はテーブルへ
+        }
+        if pos + 2 < s.count, moraTable3.contains(String(s[pos...pos+2])) { return 3 }
+        if pos + 1 < s.count, moraTable2.contains(String(s[pos...pos+1])) { return 2 }
+        return nil
+    }
+
+    /// 失敗位置 pos を含む最長の辞書語を探す
+    private static func longestDictionaryWord(_ chars: [Character], containing pos: Int, notBefore lo: Int) -> Range<Int>? {
+        let n = chars.count
+        var best: Range<Int>?
+        let aMin = max(lo, pos - 11)
+        for a in aMin...pos {
+            let bMax = min(n, a + 12)
+            guard bMax > pos else { continue }
+            for b in stride(from: bMax, to: pos, by: -1) {
+                guard b - a >= 2 else { continue }
+                if let cur = best, (b - a) <= cur.count { continue }
+                let w = String(chars[a..<b])
+                guard w.allSatisfy({ $0.isLetter }) else { continue }
+                if englishWords.contains(w) {
+                    best = a..<b
+                }
+            }
+        }
+        return best
+    }
+
+    // Kotoeri が認識するローマ字→かな パターン
+    private static let moraTable3: Set<String> = [
+        "sha", "shi", "shu", "she", "sho",
+        "chi", "cha", "chu", "che", "cho",
+        "tsu", "thi", "tha", "thu", "tho",
+        "kya", "kyi", "kyu", "kye", "kyo",
+        "nya", "nyi", "nyu", "nye", "nyo",
+        "mya", "myi", "myu", "mye", "myo",
+        "rya", "ryi", "ryu", "rye", "ryo",
+        "hya", "hyi", "hyu", "hye", "hyo",
+        "bya", "byi", "byu", "bye", "byo",
+        "pya", "pyi", "pyu", "pye", "pyo",
+        "gya", "gyi", "gyu", "gye", "gyo",
+        "dya", "dyi", "dyu", "dye", "dyo",
+        "zya", "zyi", "zyu", "zye", "zyo",
+        "sya", "syi", "syu", "sye", "syo",
+        "tya", "tyi", "tyu", "tye", "tyo",
+        "whi", "whe", "who", "dhi", "dhu",
+        "xtu", "ltu", "xya", "xyu", "xyo", "lya", "lyu", "lyo",
+    ]
+
+    private static let moraTable2: Set<String> = [
+        "ka", "ki", "ku", "ke", "ko",
+        "sa", "si", "su", "se", "so",
+        "ta", "ti", "tu", "te", "to",
+        "na", "ni", "nu", "ne", "no",
+        "ha", "hi", "hu", "he", "ho",
+        "ma", "mi", "mu", "me", "mo",
+        "ya", "yu", "yo",
+        "ra", "ri", "ru", "re", "ro",
+        "wa", "wi", "we", "wo",
+        "ga", "gi", "gu", "ge", "go",
+        "za", "zi", "zu", "ze", "zo",
+        "da", "di", "du", "de", "do",
+        "ba", "bi", "bu", "be", "bo",
+        "pa", "pi", "pu", "pe", "po",
+        "fa", "fi", "fu", "fe", "fo",
+        "ja", "ji", "ju", "je", "jo",
+        "xa", "xi", "xu", "xe", "xo",
+        "la", "li", "lu", "le", "lo",
+        "va", "vi", "vu", "ve", "vo",
+    ]
+
+    /// 英語区間の境界決定に使う語彙。
+    /// モーラ分解に失敗した位置でしか引かないので、
+    /// ローマ字として読める語 (made, name 等) が混ざっていても
+    /// 日本語判定を侵食しない（それらは分解に成功し辞書まで来ない）。
+    private static let englishWords: Set<String> = [
+        // ウェブ / 開発
+        "api", "app", "array", "async", "auth", "await", "backend", "bash", "bool",
+        "boolean", "branch", "browser", "buffer", "bug", "build", "button", "cache",
+        "callback", "check", "checkbox", "class", "cli", "click", "client", "clone",
+        "code", "column", "commit", "config", "console", "const", "cookie", "css",
+        "csv", "data", "database", "debug", "default", "delete", "deploy", "dev",
+        "dict", "diff", "div", "docker", "dom", "email", "endpoint", "enum", "env",
+        "error", "event", "export", "false", "fetch", "field", "file", "filter",
+        "fix", "flag", "flex", "float", "folder", "font", "form", "frontend", "func",
+        "function", "git", "github", "grid", "handler", "hash", "header", "height",
+        "host", "hover", "html", "http", "https", "icon", "image", "img", "import",
+        "index", "input", "install", "int", "ios", "java", "javascript", "join",
+        "jpg", "js", "json", "key", "label", "layout", "lib", "library", "lint",
+        "linux", "list", "local", "log", "login", "logout", "loop", "macos", "main",
+        "map", "margin", "markdown", "menu", "merge", "method", "mock", "mode",
+        "model", "module", "mouse", "node", "npm", "null", "object", "offset",
+        "onclick", "option", "output", "padding", "page", "param", "parse",
+        "password", "patch", "path", "pdf", "php", "pixel", "png", "port", "post",
+        "print", "prod", "promise", "prop", "pull", "push", "python", "query",
+        "queue", "react", "readme", "regex", "release", "remote", "render", "repo",
+        "request", "reset", "response", "rest", "return", "root", "route", "router",
+        "row", "ruby", "run", "rust", "save", "schema", "scope", "screen", "script",
+        "scroll", "select", "self", "server", "session", "shell", "shift", "size",
+        "slack", "sort", "source", "span", "sql", "src", "ssh", "ssl", "stack",
+        "staging", "state", "static", "status", "stdout", "string", "struct",
+        "style", "submit", "svg", "swift", "switch", "sync", "tab", "table", "tag",
+        "task", "template", "terminal", "test", "text", "theme", "thread", "throw",
+        "timeout", "tmp", "todo", "token", "tool", "top", "true", "try", "txt",
+        "type", "typescript", "ubuntu", "ui", "undefined", "undo", "unit", "unix",
+        "update", "upload", "url", "user", "utf", "util", "ux", "value", "var",
+        "version", "video", "view", "void", "vue", "web", "webpack", "width",
+        "window", "word", "wrap", "xcode", "xml", "yaml", "zip", "zoom", "zsh",
+        // 一般英語（クラスタを含みやすい語を中心に）
+        "about", "after", "all", "also", "and", "answer", "any", "ask", "back",
+        "because", "been", "before", "best", "better", "between", "big", "both",
+        "but", "can", "change", "close", "come", "could", "day", "did", "does",
+        "down", "each", "end", "even", "every", "fast", "few", "find", "first",
+        "for", "from", "get", "give", "good", "great", "had", "has", "have",
+        "help", "her", "here", "him", "his", "how", "into", "its", "just", "keep",
+        "know", "last", "left", "less", "let", "like", "line", "link", "long",
+        "look", "make", "many", "may", "more", "most", "much", "must", "need",
+        "never", "new", "next", "not", "now", "off", "old", "once", "one", "only",
+        "open", "other", "our", "out", "over", "own", "part", "people", "place",
+        "point", "put", "right", "said", "same", "say", "see", "set", "she",
+        "should", "show", "side", "since", "small", "some", "start", "still",
+        "stop", "such", "take", "tell", "than", "that", "the", "their", "them",
+        "then", "there", "these", "they", "thing", "think", "this", "those",
+        "three", "through", "time", "today", "together", "too", "turn", "two",
+        "under", "until", "upon", "use", "very", "want", "was", "way", "well",
+        "went", "were", "what", "when", "where", "which", "while", "who", "why",
+        "will", "with", "work", "world", "would", "year", "yes", "you", "your",
+    ]
 
     // MARK: - 判定
 

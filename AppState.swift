@@ -48,8 +48,9 @@ class AppState: ObservableObject {
         }
 
         if SelfTest.isEnabled {
-            // 自己テスト中は救済ロジックを止めておく（注入を自分で拾わないため）
+            // 自己テスト中は救済ロジック(タップ)を止めておく（注入を自分で拾わないため）
             keyMonitor.stop()
+            SelfTest.shared.keyMonitor = keyMonitor
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 SelfTest.shared.run()
             }
@@ -108,6 +109,7 @@ final class SelfTest: NSObject {
 
     private var window: NSWindow?
     private var textView: NSTextView?
+    weak var keyMonitor: KeyMonitor?
 
     static let shared = SelfTest()
 
@@ -149,6 +151,37 @@ final class SelfTest: NSObject {
             // 前面の別アプリへ注入する。自分はウィンドウを出さない（フォーカスを奪わない）
             itsLog.error("自己テスト: 前面アプリ=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?", privacy: .public)")
             step1SwitchIME()
+            return
+        }
+
+        if Self.mode == 3 {
+            // 実運用フロー（区間分割つき E→J 救済）を前面アプリに対して実行
+            itsLog.error("自己テスト: mode3 実救済 前面=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?", privacy: .public)")
+            keyMonitor?.testRescueToJapanese(sample)
+            // 救済完了(注入+確定)を見込んで待ち、末尾合成を確定して保存させる
+            let wait = 3.0 + Double(sample.count) * 0.05
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                self?.postKey(36, flags: [])                      // 末尾合成を確定
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self?.postKey(1, flags: .maskCommand)         // Cmd+S
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self?.finish()
+                    }
+                }
+            }
+            return
+        }
+
+        if Self.mode == 4 {
+            // 区間分割ロジックの単体確認（注入なし）
+            let segs = KeyMonitor.segment(sample.map { String($0) })
+            let chars = Array(sample)
+            let desc = segs.map { seg -> String in
+                let t = String(chars[seg.range])
+                return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
+            }.joined()
+            itsLog.error("分割テスト '\(self.sample, privacy: .public)' → \(desc, privacy: .public)")
+            finish()
             return
         }
 
