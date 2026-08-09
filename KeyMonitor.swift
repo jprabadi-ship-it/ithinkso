@@ -22,6 +22,9 @@ class KeyMonitor {
     private let injectIntervalASCII = 0.005
     /// 救済が固まったときに強制解除するまでの時間
     private let rescueTimeout = 6.0
+    /// IME 切替がアプリ側の入力コンテキストに追随するまでの最低待ち時間。
+    /// 短いバッファだと BS の所要時間が足りないため下限として必要
+    private let imeSettleDelay = 0.25
 
     // MARK: - キーコード
 
@@ -55,6 +58,8 @@ class KeyMonitor {
     private var isRescuing = false
     private var hyperWasActive = false
     private var watchdog: DispatchWorkItem?
+    /// 自タップが「自分の注入イベント」として認識した数。タグが機能しているかの確認用
+    private var syntheticSeen = 0
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -117,6 +122,7 @@ class KeyMonitor {
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
+            syntheticSeen += 1
             return Unmanaged.passRetained(event)
         }
 
@@ -243,6 +249,7 @@ class KeyMonitor {
 
     private func beginRescue() {
         isRescuing = true
+        syntheticSeen = 0
         watchdog?.cancel()
         // 非同期チェーンが途中で切れると isRescuing が true のまま固まり、
         // 全キー入力が捨てられ続けてアプリが無言で死ぬ。必ず強制解除する。
@@ -256,6 +263,9 @@ class KeyMonitor {
     }
 
     private func endRescue() {
+        if isRescuing {
+            itsLog.error("救済終了 自タップが認識した合成イベント数=\(self.syntheticSeen)")
+        }
         isRescuing = false
         watchdog?.cancel()
         watchdog = nil
@@ -276,11 +286,18 @@ class KeyMonitor {
 
     // ── 英語 → 日本語 ────────────────────────────────────────────────
     // 画面には確定済みの ASCII が入っているので、文字数ぶん BS で消すしかない。
+    //
+    // 順序が重要: 先に IME を切り替えてから BS を撃つ。
+    // TISCopyCurrentKeyboardInputSource() が返すのはシステム全体の入力ソースで、
+    // 実際に文字を受け取るアプリ側の入力コンテキストはそれに遅れて追随する。
+    // 切替直後に注入すると、システム上は日本語なのにアプリはまだ英語で、
+    // ローマ字が ASCII のまま入ってしまう。
+    // BS の所要時間（37文字で約470ms）がそのまま追随待ちになるので、
+    // この順序なら待ち時間を足さずに済む。
     private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
-        postBackspaces(saved.count) { [weak self] in
+        switchIME(toJapanese: true) { [weak self] in
             guard let self = self else { return }
-            self.switchIME(toJapanese: true) { [weak self] in
-                guard let self = self else { return }
+            self.postBackspaces(saved.count) {
                 // keyCode のみ送って Kotoeri に変換させる。
                 // keyboardSetUnicodeString を呼ぶと「変換済み」と判断されて素通しになる。
                 self.injectKeys(saved, index: 0, interval: self.injectInterval, asLiteral: false) {
@@ -312,8 +329,12 @@ class KeyMonitor {
 
     // MARK: - イベント注入
 
+    /// 注入イベントのソース状態。
+    /// 元の実装（変換に成功していた）が .privateState だったので、これに合わせる
+    private let injectSourceState: CGEventSourceStateID = .privateState
+
     private func syntheticSource() -> CGEventSource? {
-        let src = CGEventSource(stateID: .privateState)
+        let src = CGEventSource(stateID: injectSourceState)
         src?.userData = syntheticUserData
         return src
     }
@@ -350,9 +371,6 @@ class KeyMonitor {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: done)
             return
         }
-        if index == 0 {
-            itsLog.error("注入開始 \(keys.count)文字 literal=\(asLiteral) 現IME=\(self.currentSourceID(), privacy: .public)")
-        }
         let entry = keys[index]
         let src = syntheticSource()
         let down = CGEvent(keyboardEventSource: src, virtualKey: entry.keyCode, keyDown: true)
@@ -361,10 +379,26 @@ class KeyMonitor {
         down?.flags = CGEventFlags(rawValue: 0)
         up?.flags   = CGEventFlags(rawValue: 0)
 
+        let carriedBefore = down.flatMap { unicodeChar(from: $0) } ?? "(なし)"
+
         if asLiteral {
+            // J→E: IME を通さず文字をそのまま入れたいので、明示的にセットする
             var units = Array(entry.char.utf16)
             down?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
             up?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        } else {
+            // E→J: Kotoeri にローマ字として解釈させたい。
+            // CGEvent はキーコードから現在のレイアウトでユニコード文字列を
+            // 自動で埋めてしまい、それが入っていると Kotoeri は
+            // 「変換済み」と判断して素通しする（= ASCII のまま出る）。
+            // 長さ0を渡して明示的に空にする。
+            down?.keyboardSetUnicodeString(stringLength: 0, unicodeString: nil)
+            up?.keyboardSetUnicodeString(stringLength: 0, unicodeString: nil)
+        }
+
+        if index == 0 {
+            let carriedAfter = down.flatMap { unicodeChar(from: $0) } ?? "(なし)"
+            itsLog.error("注入開始 \(keys.count)文字 literal=\(asLiteral) 現IME=\(self.currentSourceID(), privacy: .public) 抱えていた文字=\(carriedBefore, privacy: .public) → 消去後=\(carriedAfter, privacy: .public)")
         }
 
         down?.post(tap: .cgSessionEventTap)
@@ -414,7 +448,7 @@ class KeyMonitor {
     private func waitUntilIME(japanese: Bool, attempts: Int, then: @escaping () -> Void) {
         if isCurrentlyJapaneseIME() == japanese {
             // 切替が反映された後、IME が入力を受け付けるまでにさらに間がある
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + imeSettleDelay) { [weak self] in
                 itsLog.error("IME切替確認OK 現IME=\(self?.currentSourceID() ?? "?", privacy: .public)")
                 then()
             }
