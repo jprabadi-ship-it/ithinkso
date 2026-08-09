@@ -149,6 +149,13 @@ class KeyMonitor {
 
         // ── 英数保留中の処理 ─────────────────────────────
         if eisuHolding {
+            // keyUp / flagsChanged ではフラッシュしない。
+            // 速いタイピングでは直前の文字の keyUp が英数押下の後に届く
+            // （ロールオーバー）ので、keyUp でフラッシュすると2度押しが
+            // 常に「新しい1度目」になってしまう（実測: 保留開始×6連発）。
+            if keyCode != eisuKeyCode && type != .keyDown {
+                return Unmanaged.passRetained(event)
+            }
             if type == .keyDown && keyCode == eisuKeyCode {
                 // 2度目の英数 → J→E 救済
                 cancelEisuHold()
@@ -166,8 +173,9 @@ class KeyMonitor {
             if type == .keyUp && keyCode == eisuKeyCode {
                 return nil  // 保留中の英数 keyUp も飲む
             }
-            // 別のキーが来た = 通常の切替後に打ち始めた
+            // 別のキー押下 = 通常の切替後に打ち始めた
             // → 英数を即時注入し、このキーは英数の後に再生する
+            itsLog.error("英数保留フラッシュ type=\(type.rawValue) keyCode=\(keyCode)")
             cancelEisuHold()
             postSyntheticKey(eisuKeyCode)
             resetBuffer()
