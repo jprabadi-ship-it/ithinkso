@@ -22,9 +22,9 @@ class KeyMonitor {
     private let injectIntervalASCII = 0.005
     /// 救済が固まったときに強制解除するまでの時間
     private let rescueTimeout = 6.0
-    /// IME 切替がアプリ側の入力コンテキストに追随するまでの最低待ち時間。
-    /// 短いバッファだと BS の所要時間が足りないため下限として必要
-    private let imeSettleDelay = 0.25
+    /// かな/英数キー注入から前面アプリの IME が切り替わるまでの待ち時間。
+    /// 実測: 0.15s では不達、0.3s で安定。マージン込みで 0.4s
+    private let imeSettleDelay = 0.4
 
     // MARK: - キーコード
 
@@ -420,48 +420,21 @@ class KeyMonitor {
         return list
     }
 
-    /// IME を切り替え、「実際に切り替わったこと」を確認してから続きを実行する。
-    /// 固定時間待ちだと切替前に注入が始まり、ローマ字がそのまま ASCII で出てしまう。
+    /// IME を切り替えてから続きを実行する。
+    ///
+    /// TISSelectInputSource は使わない。あれが返す/切り替えるのは
+    /// 「呼び出したプロセスの入力コンテキスト」で、バックグラウンドの
+    /// 本アプリから呼んでも前面アプリの IME は切り替わらない
+    /// （自己テストで実証: TIS方式は前面アプリで ASCII のまま、
+    /// かなキー注入方式は正しく変換された）。
+    /// かな(104)/英数(102)キーの注入なら通常のキー経路を通り、前面アプリに効く。
     private func switchIME(toJapanese: Bool, then: @escaping () -> Void) {
-        let ids = toJapanese ? japaneseSourceIDs : englishSourceIDs
-        let sources = keyboardSources()
-
-        var selected: String?
-        for id in ids {
-            if let source = sources.first(where: { inputSourceID($0) == id }) {
-                let status = TISSelectInputSource(source)
-                itsLog.error("IME切替要求 → \(id, privacy: .public) OSStatus=\(status)")
-                selected = id
-                break
-            }
-        }
-        guard selected != nil else {
-            itsLog.error("切替先の入力ソースが見つからない: \(ids, privacy: .public)")
-            then()
-            return
-        }
-
-        waitUntilIME(japanese: toJapanese, attempts: 20, then: then)
-    }
-
-    /// 50ms 間隔で最大 attempts 回、目的の IME になるまで待つ
-    private func waitUntilIME(japanese: Bool, attempts: Int, then: @escaping () -> Void) {
-        if isCurrentlyJapaneseIME() == japanese {
-            // 切替が反映された後、IME が入力を受け付けるまでにさらに間がある
-            DispatchQueue.main.asyncAfter(deadline: .now() + imeSettleDelay) { [weak self] in
-                itsLog.error("IME切替確認OK 現IME=\(self?.currentSourceID() ?? "?", privacy: .public)")
-                then()
-            }
-            return
-        }
-        guard attempts > 0 else {
-            itsLog.error("IME切替が確認できないまま続行 現IME=\(self.currentSourceID(), privacy: .public)")
-            then()
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.waitUntilIME(japanese: japanese, attempts: attempts - 1, then: then)
-        }
+        let keyCode: CGKeyCode = toJapanese ? 104 : 102  // かな / 英数
+        postSyntheticKey(keyCode)
+        itsLog.error("IME切替: \(toJapanese ? "かな" : "英数", privacy: .public)キー(\(keyCode))を注入")
+        // かなキー投函から前面アプリの IME が実際に切り替わるまで:
+        // 0.15s では不達、0.3s で安定（実測）。マージンを取って imeSettleDelay
+        DispatchQueue.main.asyncAfter(deadline: .now() + imeSettleDelay, execute: then)
     }
 
     private func currentSourceID() -> String {
