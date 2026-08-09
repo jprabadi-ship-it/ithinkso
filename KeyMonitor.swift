@@ -15,7 +15,7 @@ class KeyMonitor {
     /// これを超えたら救済しない。中途半端に一部だけ打ち直すと事故になるため
     private let maxBufferCount = 100
     /// BS 連打の間隔。0 だと取りこぼすアプリがある
-    private let backspaceInterval = 0.008
+    private let backspaceInterval = 0.012
     /// Kotoeri に流し込む間隔。IME の変換処理を待つ必要がある
     private let injectInterval = 0.030
     /// IME を通さない注入の間隔。変換待ちが不要なので詰められる
@@ -154,8 +154,10 @@ class KeyMonitor {
                 cancelEisuHold()
                 if buffer.isEmpty {
                     // 直前の打鍵がない: 救済対象なし。普通に切り替えるだけ
+                    itsLog.error("英数2度目 (buffer空) → 通常切替のみ")
                     postSyntheticKey(eisuKeyCode)
                 } else {
+                    itsLog.error("英数2度目 → J→E 救済 (buffer=\(self.buffer.count)文字 '\(self.buffer.map { $0.char }.joined(), privacy: .public)')")
                     resetBuffer()
                     rescueToEnglishViaF10()
                 }
@@ -196,7 +198,7 @@ class KeyMonitor {
                 let snapshot = kanaTapSnapshot
                 kanaTapSnapshot = []
                 if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
-                    triggerRescueToJapanese(saved)
+                    triggerRescueToJapanese(saved, skipSwitch: true)
                 }
                 return nil
             }
@@ -210,6 +212,7 @@ class KeyMonitor {
 
         // ── 英数キー: 1度目を飲んで保留 ───────────────────
         if keyCode == eisuKeyCode {
+            itsLog.error("英数1度目 → 保留開始 (buffer=\(self.buffer.count)文字)")
             beginEisuHold()
             return nil
         }
@@ -255,6 +258,7 @@ class KeyMonitor {
             // 2度目が来なかった: 通常の切替として英数を注入し直す
             self.eisuHolding = false
             self.eisuHoldTimer = nil
+            itsLog.error("英数保留タイムアウト → 通常切替として注入")
             self.postSyntheticKey(self.eisuKeyCode)
             self.resetBuffer()
         }
@@ -325,11 +329,12 @@ class KeyMonitor {
         return saved
     }
 
-    private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
+    private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
+                                         skipSwitch: Bool = false) {
         beginRescue()
         let romaji = saved.map { $0.char }.joined()
         itsLog.error("救済開始 E→J '\(romaji, privacy: .public)' \(saved.count)文字")
-        rescueToJapanese(saved)
+        rescueToJapanese(saved, skipSwitch: skipSwitch)
     }
 
     // ── 日本語 → 英語（F10 方式） ──────────────────────────────────
@@ -343,7 +348,9 @@ class KeyMonitor {
         beginRescue()
         itsLog.error("救済開始 J→E (F10方式)")
         postSyntheticKey(f10KeyCode)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        // 実運用の合成は履歴が長く F10 の再表示に時間がかかることがある。
+        // Return が早すぎると変換途中で確定して部分英字化する
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self else { return }
             self.postSyntheticKey(self.returnKeyCode)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -366,15 +373,29 @@ class KeyMonitor {
     //   確定しないと、literal が未確定合成と衝突する上、
     //   ライブ変換の「解析不能なら全体を生 ASCII に戻す」挙動に巻き込まれる。
     // - 末尾の日本語区間は確定しない（ユーザーが変換を続けられるように）
-    private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
+    /// skipSwitch: かな×2 トリガー経由では1度目の実かな押しが既に
+    /// 日本語へ切り替えているため、かなを再注入しない。
+    /// 短時間にかなが3連打されると Kotoeri 側の2度押し機能（再変換等）を
+    /// 誤発動させ、BS の削除数が狂う（実測: 先頭4文字が残った）。
+    private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
+                                  skipSwitch: Bool = false) {
         let segs = Self.segment(saved.map { $0.char })
         let desc = segs.map { seg -> String in
             let t = saved[seg.range].map { $0.char }.joined()
             return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
         }.joined()
-        itsLog.error("区間分割: \(desc, privacy: .public)")
+        itsLog.error("区間分割: \(desc, privacy: .public) skipSwitch=\(skipSwitch)")
 
-        switchIME(toJapanese: true) { [weak self] in
+        let begin: (@escaping () -> Void) -> Void = { [weak self] then in
+            guard let self else { return }
+            if skipSwitch {
+                // 切替済み。IME の受け入れ態勢だけ短く待つ
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: then)
+            } else {
+                self.switchIME(toJapanese: true, then: then)
+            }
+        }
+        begin { [weak self] in
             guard let self = self else { return }
             self.postBackspaces(saved.count) {
                 self.injectSegments(saved, segs, 0)
@@ -429,9 +450,36 @@ class KeyMonitor {
         rescueToJapanese(saved)
     }
 
-    /// J→E 救済をテスト駆動する（合成が開いている前提で F10 チェーンを流す）
+    /// J→E 救済をテスト駆動する。ITS_JE でバリアント切替:
+    ///   plain = F10 のみ / esc = Esc で読みに戻してから F10 / f10x3 = F10 を3連打
     func testRescueToEnglish() {
-        rescueToEnglishViaF10()
+        let variant = ProcessInfo.processInfo.environment["ITS_JE"] ?? "plain"
+        beginRescue()
+        itsLog.error("J→E テスト variant=\(variant, privacy: .public)")
+        let f10Chain: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.postSyntheticKey(self.f10KeyCode)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.postSyntheticKey(self.returnKeyCode)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self.postSyntheticKey(self.eisuKeyCode)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.endRescue() }
+                }
+            }
+        }
+        switch variant {
+        case "esc":
+            postSyntheticKey(escapeKeyCode)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: f10Chain)
+        case "f10x3":
+            postSyntheticKey(f10KeyCode)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.postSyntheticKey(self!.f10KeyCode)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: f10Chain)
+            }
+        default:
+            f10Chain()
+        }
     }
 
     // MARK: - イベント注入
