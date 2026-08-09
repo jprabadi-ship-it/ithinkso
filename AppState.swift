@@ -209,10 +209,9 @@ final class SelfTest: NSObject {
         if Self.mode == 4 {
             // 区間分割ロジックの単体確認（注入なし）
             let segs = KeyMonitor.segment(sample.map { String($0) })
-            let chars = Array(sample)
             let desc = segs.map { seg -> String in
-                let t = String(chars[seg.range])
-                return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
+                let mark = seg.corrected ? "✱" : ""
+                return seg.isEnglish ? "[EN:\(seg.text)\(mark)]" : "[JA:\(seg.text)\(mark)]"
             }.joined()
             itsLog.error("分割テスト '\(self.sample, privacy: .public)' → \(desc, privacy: .public)")
             finish()

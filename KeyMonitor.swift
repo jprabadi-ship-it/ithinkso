@@ -332,8 +332,8 @@ class KeyMonitor {
                                   skipSwitch: Bool = false) {
         let segs = Self.segment(saved.map { $0.char })
         let desc = segs.map { seg -> String in
-            let t = saved[seg.range].map { $0.char }.joined()
-            return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
+            let mark = seg.corrected ? "✱" : ""
+            return seg.isEnglish ? "[EN:\(seg.text)\(mark)]" : "[JA:\(seg.text)\(mark)]"
         }.joined()
         itsLog.error("区間分割: \(desc, privacy: .public) skipSwitch=\(skipSwitch)")
 
@@ -361,7 +361,12 @@ class KeyMonitor {
             return
         }
         let seg = segs[idx]
-        let keys = Array(saved[seg.range])
+        // 修復で内容が元のバッファと変わりうるので、区間のテキストから
+        // keyCode を引き直す（a-z と '-' はすべて asciiKeyMap にある）
+        let keys: [(keyCode: CGKeyCode, char: String)] = seg.text.compactMap { ch in
+            guard let kc = Self.asciiKeyMap[Character(ch.lowercased())] else { return nil }
+            return (keyCode: kc, char: String(ch))
+        }
         let interval = seg.isEnglish ? injectIntervalASCII : injectInterval
         injectKeys(keys, index: 0, interval: interval, asLiteral: seg.isEnglish) { [weak self] in
             guard let self = self else { return }
@@ -573,57 +578,94 @@ class KeyMonitor {
     // → IME に投げる前に自前で日本語/英語の区間に割り、
     //   日本語区間だけを Kotoeri に食わせる必要がある。
 
+    /// 分割結果。text は修復適用後の内容（元のバッファと異なりうる）
     struct Segment {
-        let range: Range<Int>
+        let text: String
         let isEnglish: Bool
+        let corrected: Bool
     }
 
-    /// モーラ分解に失敗した位置を英語のアンカーとし、アンカーを含む
-    /// 最長の既知英単語まで区間を広げる（"check" の che が チェ に
-    /// 食われた後で ck が余る、を防ぐ）。辞書に無ければ失敗クラスタのみ。
-    /// 迷ったらローマ字（日本語）に倒す: 分解できる列は辞書を引かない。
-    /// そのため name/made 等の「ローマ字としても読める英単語」は日本語になる。
+    /// 区間分割 + タイポ修復。
+    ///
+    /// モーラ分解に失敗した位置ごとに、優先順で:
+    ///  1. 辞書の完全一致語（check, div 等）→ 英語区間
+    ///  2. 辞書の曖昧一致語（Damerau-Levenshtein 距離1、語長4以上）
+    ///     → 修正した語で英語区間（checj → check）
+    ///  3. ローマ字の1編集修復（転置 > 削除 > 隣接キー置換）
+    ///     → 修復して日本語として再解釈（tuski → tsuki → つき）
+    ///  4. どれも成立しない → 失敗クラスタをそのまま英語区間
+    ///
+    /// 迷ったらローマ字原則は維持: 分解できる列には一切手を付けない。
+    /// 修復は1回の救済で最大3箇所（それ以上は打ち直しでなくゴミの可能性が高い）
     static func segment(_ text: [String]) -> [Segment] {
-        let chars = text.map { Character($0.lowercased()) }
-        let n = chars.count
+        var chars = text.map { Character($0.lowercased()) }
         var result: [Segment] = []
         var jaStart = 0
         var i = 0
+        var repairsLeft = 3
 
-        while i < n {
+        while i < chars.count {
             if let len = moraLength(chars, i) {
                 i += len
                 continue
             }
-            // 分解失敗 → 英語区間を決める
-            var engRange: Range<Int>
-            if let word = longestDictionaryWord(chars, containing: i, notBefore: jaStart) {
-                engRange = word
-            } else {
-                // 辞書に無い: 連続する分解不能文字のみを英語扱い
-                var end = i + 1
-                while end < n, chars[end].isLetter, moraLength(chars, end) == nil {
-                    end += 1
+            // 1) 辞書の完全一致（check, div 等の正しく打てた英単語）
+            if let (range, word) = dictionaryAnchor(chars, containing: i, notBefore: jaStart, fuzzy: false) {
+                if range.lowerBound > jaStart {
+                    result.append(Segment(text: String(chars[jaStart..<range.lowerBound]),
+                                          isEnglish: false, corrected: false))
                 }
-                engRange = i..<end
+                result.append(Segment(text: word, isEnglish: true, corrected: false))
+                i = range.upperBound
+                jaStart = i
+                continue
             }
-            if engRange.lowerBound > jaStart {
-                result.append(Segment(range: jaStart..<engRange.lowerBound, isEnglish: false))
+            // 2) ローマ字修復（tuski → tsuki）。
+            //    曖昧辞書より先に試す: 日本語として1編集で直るなら日本語とみなす
+            //    （tuski が tusk→task に食われる誤修正の防止）。
+            //    修復後も分解できない列（checj 等）はここを素通りして 3) に届く
+            if repairsLeft > 0, let (fixed, desc) = repaired(chars, failAt: i, from: jaStart) {
+                repairsLeft -= 1
+                itsLog.error("タイポ修復: \(desc, privacy: .public)")
+                chars = fixed
+                i = jaStart   // 修復で前のモーラ境界が変わりうるので走査し直す
+                continue
             }
-            result.append(Segment(range: engRange, isEnglish: true))
-            i = engRange.upperBound
-            jaStart = engRange.upperBound
+            // 3) 辞書の曖昧一致（checj → check）
+            if let (range, word) = dictionaryAnchor(chars, containing: i, notBefore: jaStart, fuzzy: true) {
+                if range.lowerBound > jaStart {
+                    result.append(Segment(text: String(chars[jaStart..<range.lowerBound]),
+                                          isEnglish: false, corrected: false))
+                }
+                let original = String(chars[range])
+                result.append(Segment(text: word, isEnglish: true, corrected: word != original))
+                i = range.upperBound
+                jaStart = i
+                continue
+            }
+            // 4) 未知の英語クラスタ
+            var clusterEnd = i + 1
+            while clusterEnd < chars.count, chars[clusterEnd].isLetter,
+                  moraLength(chars, clusterEnd) == nil {
+                clusterEnd += 1
+            }
+            if i > jaStart {
+                result.append(Segment(text: String(chars[jaStart..<i]), isEnglish: false, corrected: false))
+            }
+            result.append(Segment(text: String(chars[i..<clusterEnd]), isEnglish: true, corrected: false))
+            i = clusterEnd
+            jaStart = clusterEnd
         }
-        if jaStart < n {
-            result.append(Segment(range: jaStart..<n, isEnglish: false))
+        if jaStart < chars.count {
+            result.append(Segment(text: String(chars[jaStart...]), isEnglish: false, corrected: false))
         }
-        // 隣接する英語区間を統合
+        // 隣接する同種区間を統合
         var merged: [Segment] = []
         for seg in result {
-            if let last = merged.last, last.isEnglish == seg.isEnglish,
-               last.range.upperBound == seg.range.lowerBound {
-                merged[merged.count - 1] = Segment(range: last.range.lowerBound..<seg.range.upperBound,
-                                                   isEnglish: seg.isEnglish)
+            if let last = merged.last, last.isEnglish == seg.isEnglish {
+                merged[merged.count - 1] = Segment(text: last.text + seg.text,
+                                                   isEnglish: seg.isEnglish,
+                                                   corrected: last.corrected || seg.corrected)
             } else {
                 merged.append(seg)
             }
@@ -654,26 +696,131 @@ class KeyMonitor {
         return nil
     }
 
-    /// 失敗位置 pos を含む最長の辞書語を探す
-    private static func longestDictionaryWord(_ chars: [Character], containing pos: Int, notBefore lo: Int) -> Range<Int>? {
+    /// 失敗位置を含む辞書語を探す。
+    /// fuzzy=false: 完全一致（最長・語長2以上）
+    /// fuzzy=true:  Damerau-Levenshtein 距離1（最長・語長4以上）。
+    ///              同長の別候補が競合したら誤修正を避けて適用しない
+    private static func dictionaryAnchor(_ chars: [Character], containing pos: Int,
+                                         notBefore lo: Int, fuzzy: Bool) -> (Range<Int>, String)? {
         let n = chars.count
-        var best: Range<Int>?
         let aMin = max(lo, pos - 11)
+
+        if !fuzzy {
+            var exact: (Range<Int>, String)?
+            for a in aMin...pos {
+                let bMax = min(n, a + 12)
+                guard bMax > pos else { continue }
+                for b in stride(from: bMax, to: pos, by: -1) {
+                    guard b - a >= 2 else { continue }
+                    if let cur = exact, (b - a) <= cur.0.count { continue }
+                    let w = String(chars[a..<b])
+                    guard w.allSatisfy({ $0.isLetter }) else { continue }
+                    if englishWords.contains(w) { exact = (a..<b, w) }
+                }
+            }
+            return exact
+        }
+
+        var best: (Range<Int>, String)?
+        var bestLen = 0
+        var ambiguous = false
         for a in aMin...pos {
             let bMax = min(n, a + 12)
             guard bMax > pos else { continue }
             for b in stride(from: bMax, to: pos, by: -1) {
-                guard b - a >= 2 else { continue }
-                if let cur = best, (b - a) <= cur.count { continue }
-                let w = String(chars[a..<b])
-                guard w.allSatisfy({ $0.isLetter }) else { continue }
-                if englishWords.contains(w) {
-                    best = a..<b
+                guard b - a >= 4 else { continue }
+                let sub = String(chars[a..<b])
+                guard sub.allSatisfy({ $0.isLetter }) else { continue }
+                for word in englishWords where abs(word.count - sub.count) <= 1 && word.count >= 4 {
+                    guard withinOneEdit(sub, word) else { continue }
+                    if word.count > bestLen {
+                        best = (a..<b, word); bestLen = word.count; ambiguous = false
+                    } else if word.count == bestLen, best?.1 != word {
+                        ambiguous = true
+                    }
                 }
             }
         }
+        if ambiguous { return nil }
         return best
     }
+
+    /// Damerau-Levenshtein 距離がちょうど1か（置換 / 隣接転置 / 挿入 / 削除）
+    static func withinOneEdit(_ a: String, _ b: String) -> Bool {
+        if a == b { return false }
+        let x = Array(a), y = Array(b)
+        if x.count == y.count {
+            var diffs: [Int] = []
+            for k in 0..<x.count where x[k] != y[k] {
+                diffs.append(k)
+                if diffs.count > 2 { return false }
+            }
+            if diffs.count == 1 { return true }
+            if diffs.count == 2, diffs[1] == diffs[0] + 1,
+               x[diffs[0]] == y[diffs[1]], x[diffs[1]] == y[diffs[0]] { return true }
+            return false
+        }
+        let (short, long) = x.count < y.count ? (x, y) : (y, x)
+        guard long.count - short.count == 1 else { return false }
+        var si = 0, li = 0, skipped = false
+        while si < short.count && li < long.count {
+            if short[si] == long[li] { si += 1; li += 1 }
+            else if !skipped { skipped = true; li += 1 }
+            else { return false }
+        }
+        return true
+    }
+
+    /// ローマ字の1編集修復。失敗位置 i の周辺に 転置 > 削除 > 隣接キー置換 を
+    /// 優先順で試し、jaStart から i+5 文字目あたりまで分解が通る修復を採用する
+    private static func repaired(_ chars: [Character], failAt i: Int,
+                                 from start: Int) -> ([Character], String)? {
+        func localOK(_ cs: [Character]) -> Bool {
+            var q = start
+            let goal = min(cs.count, i + 5)
+            while q < cs.count {
+                if q >= goal { return true }
+                guard let l = moraLength(cs, q) else { return false }
+                q += l
+            }
+            return true
+        }
+        // 転置（tuski → tsuki）
+        for j in [i - 1, i] where j >= start && j + 1 < chars.count && chars[j] != chars[j + 1] {
+            var c = chars
+            c.swapAt(j, j + 1)
+            if localOK(c) {
+                return (c, "転置 '\(chars[j])\(chars[j+1])'→'\(c[j])\(c[j+1])'")
+            }
+        }
+        // 削除（余計な子音の混入）
+        if i < chars.count {
+            var c = chars
+            let removed = c.remove(at: i)
+            if localOK(c) { return (c, "削除 '\(removed)'") }
+        }
+        // 隣接キー置換（QWERTY で隣のキーを押した）
+        if i < chars.count, let neighbors = qwertyNeighbors[chars[i]] {
+            for r in neighbors {
+                var c = chars
+                c[i] = r
+                if localOK(c) { return (c, "置換 '\(chars[i])'→'\(r)'") }
+            }
+        }
+        return nil
+    }
+
+    /// QWERTY の物理隣接キー（タイポ置換の探索範囲）
+    private static let qwertyNeighbors: [Character: [Character]] = [
+        "q": ["w","a"], "w": ["q","e","s"], "e": ["w","r","d"], "r": ["e","t","f"],
+        "t": ["r","y","g"], "y": ["t","u","h"], "u": ["y","i","j"], "i": ["u","o","k"],
+        "o": ["i","p","l"], "p": ["o","l"],
+        "a": ["q","s","z"], "s": ["a","d","w","x"], "d": ["s","f","e","c"],
+        "f": ["d","g","r","v"], "g": ["f","h","t","b"], "h": ["g","j","y","n"],
+        "j": ["h","k","u","m"], "k": ["j","l","i"], "l": ["k","o","p"],
+        "z": ["a","x"], "x": ["z","c","s"], "c": ["x","v","d"], "v": ["c","b","f"],
+        "b": ["v","n","g"], "n": ["b","m","h"], "m": ["n","j"],
+    ]
 
     // Kotoeri が認識するローマ字→かな パターン
     private static let moraTable3: Set<String> = [
