@@ -49,4 +49,6 @@ I think so は、その打ち直しを「かなキー2度押し」ひとつで�
 （未定 – 無料 or 有料を決める）
 
 ## プライバシーポリシー URL
-（要ホスティング: docs/privacy-policy.md を GitHub Pages 等に置いて URL を記載）
+https://jprabadi-ship-it.github.io/ithinkso-privacy/
+（リポジトリ: https://github.com/jprabadi-ship-it/ithinkso-privacy — 内容を変えたいときは
+docs/privacy-policy.md を編集してからこのリポジトリの index.md に反映する）
