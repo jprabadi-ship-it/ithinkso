@@ -27,7 +27,7 @@ class AppState: ObservableObject {
                     try SMAppService.mainApp.unregister()
                 }
             } catch {
-                print("SMAppService error: \(error)")
+                itsLog.error("SMAppService error: \(error)")
                 // 失敗時は状態をロールバック（再帰防止）
                 isUpdatingLaunchAtLogin = true
                 launchAtLogin = oldValue

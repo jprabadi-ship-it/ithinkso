@@ -248,7 +248,7 @@ class KeyMonitor {
         // 全キー入力が捨てられ続けてアプリが無言で死ぬ。必ず強制解除する。
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isRescuing else { return }
-            print("[ITS] watchdog fired → 救済が固まったので強制解除")
+            itsLog.error("watchdog 発火 → 救済が固まったので強制解除")
             self.endRescue()
         }
         watchdog = work
