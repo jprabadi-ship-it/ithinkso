@@ -1,5 +1,10 @@
 import Cocoa
 import Carbon
+import os
+
+/// GUI アプリの print は unified log に乗らないため、追跡は os_log で行う。
+/// 読むとき: /usr/bin/log show --predicate 'subsystem == "com.ithinkso.app"' --last 2m
+let itsLog = Logger(subsystem: "com.ithinkso.app", category: "keymonitor")
 
 class KeyMonitor {
 
@@ -82,7 +87,7 @@ class KeyMonitor {
             },
             userInfo: selfPtr
         ) else {
-            print("[ITS] FAILED to create event tap")
+            itsLog.error("event tap の作成に失敗。ListenEvent と PostEvent の両方が許可されているか確認")
             Unmanaged<KeyMonitor>.fromOpaque(selfPtr).release()
             return
         }
@@ -91,7 +96,7 @@ class KeyMonitor {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        print("[ITS] event tap created and enabled ✓")
+        itsLog.error("event tap 作成・有効化 OK")
     }
 
     func stop() {
@@ -139,12 +144,14 @@ class KeyMonitor {
                 }
             }
 
-            // Caps Lock（リマップしていない環境）→ 日本語へ打ち直し
+            // Caps Lock は常に飲み込む（大文字ロック機能を犠牲にする）。
+            // 救済が成立した時だけ飲み込む作りにすると、条件を満たさなかった回だけ
+            // ロックが切り替わり、同じキーを押しているのに挙動が変わって混乱する。
             if keyCode == capsLockKeyCode {
                 if let saved = takeRescuableBuffer() {
-                    triggerRescue(saved: saved, toJapanese: true)
-                    return nil
+                    triggerRescue(saved: saved, toJapanese: !isCurrentlyJapaneseIME())
                 }
+                return nil
             }
             return Unmanaged.passRetained(event)
         }
@@ -220,11 +227,15 @@ class KeyMonitor {
         resetBuffer()
 
         if overflowed {
-            print("[ITS] buffer overflow (>\(maxBufferCount)) → 救済しない")
+            itsLog.error("バッファ上限超過 (>\(self.maxBufferCount)) → 救済しない")
             return nil
         }
         guard saved.count >= rescueThreshold else { return nil }
-        guard looksLikeRomaji(saved.map { $0.char }.joined()) else { return nil }
+        let text = saved.map { $0.char }.joined()
+        guard looksLikeRomaji(text) else {
+            itsLog.error("ローマ字と判定されず救済しない: \(text, privacy: .public)")
+            return nil
+        }
         return saved
     }
 
@@ -253,7 +264,8 @@ class KeyMonitor {
     private func triggerRescue(saved: [(keyCode: CGKeyCode, char: String)], toJapanese: Bool) {
         beginRescue()
         let romaji = saved.map { $0.char }.joined()
-        print("[ITS] rescue \(toJapanese ? "E→J" : "J→E"): '\(romaji)' (\(saved.count) chars)")
+        let dir = toJapanese ? "E→J" : "J→E"
+        itsLog.error("救済開始 \(dir, privacy: .public) '\(romaji, privacy: .public)' \(saved.count)文字 現IME=\(self.currentSourceID(), privacy: .public)")
 
         if toJapanese {
             rescueToJapanese(saved)
@@ -334,8 +346,12 @@ class KeyMonitor {
                             asLiteral: Bool,
                             done: @escaping () -> Void) {
         guard index < keys.count else {
+            itsLog.error("注入完了 \(keys.count)文字 現IME=\(self.currentSourceID(), privacy: .public)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: done)
             return
+        }
+        if index == 0 {
+            itsLog.error("注入開始 \(keys.count)文字 literal=\(asLiteral) 現IME=\(self.currentSourceID(), privacy: .public)")
         }
         let entry = keys[index]
         let src = syntheticSource()
@@ -370,36 +386,54 @@ class KeyMonitor {
         return list
     }
 
-    /// IME を切り替え、切替完了通知を待ってから続きを実行する
+    /// IME を切り替え、「実際に切り替わったこと」を確認してから続きを実行する。
+    /// 固定時間待ちだと切替前に注入が始まり、ローマ字がそのまま ASCII で出てしまう。
     private func switchIME(toJapanese: Bool, then: @escaping () -> Void) {
         let ids = toJapanese ? japaneseSourceIDs : englishSourceIDs
         let sources = keyboardSources()
 
-        var done = false
-        var observer: Any?
-        let finish: () -> Void = {
-            guard !done else { return }
-            done = true
-            if let o = observer { DistributedNotificationCenter.default().removeObserver(o) }
-            // 切替直後は IME がまだ受け入れ態勢にないことがあるので少し待つ
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: then)
-        }
-
-        observer = DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-            object: nil, queue: .main
-        ) { _ in finish() }
-
-        // 通知が来ないことがあるのでタイムアウトを必ず張る
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { finish() }
-
+        var selected: String?
         for id in ids {
             if let source = sources.first(where: { inputSourceID($0) == id }) {
-                TISSelectInputSource(source)
-                return
+                let status = TISSelectInputSource(source)
+                itsLog.error("IME切替要求 → \(id, privacy: .public) OSStatus=\(status)")
+                selected = id
+                break
             }
         }
-        print("[ITS] 切替先の入力ソースが見つからない: \(ids)")
+        guard selected != nil else {
+            itsLog.error("切替先の入力ソースが見つからない: \(ids, privacy: .public)")
+            then()
+            return
+        }
+
+        waitUntilIME(japanese: toJapanese, attempts: 20, then: then)
+    }
+
+    /// 50ms 間隔で最大 attempts 回、目的の IME になるまで待つ
+    private func waitUntilIME(japanese: Bool, attempts: Int, then: @escaping () -> Void) {
+        if isCurrentlyJapaneseIME() == japanese {
+            // 切替が反映された後、IME が入力を受け付けるまでにさらに間がある
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                itsLog.error("IME切替確認OK 現IME=\(self?.currentSourceID() ?? "?", privacy: .public)")
+                then()
+            }
+            return
+        }
+        guard attempts > 0 else {
+            itsLog.error("IME切替が確認できないまま続行 現IME=\(self.currentSourceID(), privacy: .public)")
+            then()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.waitUntilIME(japanese: japanese, attempts: attempts - 1, then: then)
+        }
+    }
+
+    private func currentSourceID() -> String {
+        guard let src = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let id = inputSourceID(src) else { return "(取得不可)" }
+        return id
     }
 
     private func isCurrentlyJapaneseIME() -> Bool {
