@@ -28,13 +28,16 @@ class KeyMonitor {
 
     // MARK: - キーコード
 
-    private let capsLockKeyCode: CGKeyCode = 57   // 標準キーボード（flagsChanged で来る）
     private let eisuKeyCode: CGKeyCode = 102      // JIS 英数キー
-    private let f18KeyCode: CGKeyCode = 79        // F18（Caps Lock を Karabiner でリマップ）
+    private let kanaKeyCode: CGKeyCode = 104      // JIS かなキー
+    private let f10KeyCode: CGKeyCode = 109       // F10（Kotoeri: 合成を半角英字に変換）
     private let backspaceKeyCode: CGKeyCode = 51
     private let escapeKeyCode: CGKeyCode = 53
     private let spaceKeyCode: CGKeyCode = 49
     private let returnKeyCode: CGKeyCode = 36
+
+    /// 2度押し判定の窓
+    private let doubleTapWindow: TimeInterval = 0.35
 
     // MARK: - 入力ソース
 
@@ -56,10 +59,17 @@ class KeyMonitor {
     /// 上限を超えた記録。超えた回は救済を諦める
     private var bufferOverflowed = false
     private var isRescuing = false
-    private var hyperWasActive = false
     private var watchdog: DispatchWorkItem?
     /// 自タップが「自分の注入イベント」として認識した数。タグが機能しているかの確認用
     private var syntheticSeen = 0
+
+    // かな2度押しの状態
+    private var kanaFirstTapTime: TimeInterval = 0
+    private var kanaTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
+    private var kanaTapOverflowed = false
+    // 英数保留の状態
+    private var eisuHolding = false
+    private var eisuHoldTimer: DispatchWorkItem?
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -119,6 +129,11 @@ class KeyMonitor {
 
     // MARK: - イベント処理
 
+    // トリガー体系:
+    //   かな×2 (350ms以内) → E→J 救済。1度目は素通し（通常の切替）、2度目を飲む
+    //   英数×2 (350ms以内) → J→E 救済。英数は1度目の押下が未確定合成を確定して
+    //     しまうため、1度目を飲んで保留し、2度目が来なければ注入し直す
+    //   Caps Lock / F18 / Hyper はもう使わない（通常機能のまま）
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
@@ -128,54 +143,75 @@ class KeyMonitor {
 
         // 救済中に打たれた実キーは捨てる。
         // 素通しすると、注入中のキー列に実キーが割り込んで文字列が壊れる。
-        // 50文字の救済は最悪2秒以上かかるので、素通しでは確実に混入する。
         guard !isRescuing else { return nil }
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
-        if type == .flagsChanged {
-            let flags = event.flags
-            let isHyper = flags.contains(.maskShift)
-                       && flags.contains(.maskCommand)
-                       && flags.contains(.maskControl)
-                       && flags.contains(.maskAlternate)
-
-            if isHyper {
-                hyperWasActive = true
-            } else if hyperWasActive {
-                // 4つ全部押していた→離した瞬間に発火
-                hyperWasActive = false
-                if let saved = takeRescuableBuffer() {
-                    triggerRescue(saved: saved, toJapanese: false)
-                }
-            }
-
-            // Caps Lock は常に飲み込む（大文字ロック機能を犠牲にする）。
-            // 救済が成立した時だけ飲み込む作りにすると、条件を満たさなかった回だけ
-            // ロックが切り替わり、同じキーを押しているのに挙動が変わって混乱する。
-            if keyCode == capsLockKeyCode {
-                if let saved = takeRescuableBuffer() {
-                    triggerRescue(saved: saved, toJapanese: !isCurrentlyJapaneseIME())
+        // ── 英数保留中の処理 ─────────────────────────────
+        if eisuHolding {
+            if type == .keyDown && keyCode == eisuKeyCode {
+                // 2度目の英数 → J→E 救済
+                cancelEisuHold()
+                if buffer.isEmpty {
+                    // 直前の打鍵がない: 救済対象なし。普通に切り替えるだけ
+                    postSyntheticKey(eisuKeyCode)
+                } else {
+                    resetBuffer()
+                    rescueToEnglishViaF10()
                 }
                 return nil
             }
+            if type == .keyUp && keyCode == eisuKeyCode {
+                return nil  // 保留中の英数 keyUp も飲む
+            }
+            // 別のキーが来た = 通常の切替後に打ち始めた
+            // → 英数を即時注入し、このキーは英数の後に再生する
+            cancelEisuHold()
+            postSyntheticKey(eisuKeyCode)
+            resetBuffer()
+            if type == .keyDown, let chars = unicodeChar(from: event), isBufferable(chars) {
+                buffer.append((keyCode: keyCode, char: chars))
+            }
+            if let copy = event.copy() {
+                copy.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    copy.post(tap: .cgSessionEventTap)
+                }
+            }
+            return nil
+        }
+
+        if type == .flagsChanged {
             return Unmanaged.passRetained(event)
         }
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
-        // F18（Caps Lock を Karabiner でリマップ）→ 今の IME と逆方向へ
-        if keyCode == f18KeyCode {
-            if let saved = takeRescuableBuffer() {
-                triggerRescue(saved: saved, toJapanese: !isCurrentlyJapaneseIME())
+        // ── かなキー: 2度押しで E→J 救済 ─────────────────
+        if keyCode == kanaKeyCode {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - kanaFirstTapTime < doubleTapWindow {
+                // 2度目 → 救済。このイベントは飲む
+                kanaFirstTapTime = 0
+                let snapshot = kanaTapSnapshot
+                kanaTapSnapshot = []
+                if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
+                    triggerRescueToJapanese(saved)
+                }
+                return nil
             }
+            // 1度目: バッファを退避してから素通し（通常の日本語切替として働く）
+            kanaFirstTapTime = now
+            kanaTapSnapshot = buffer
+            kanaTapOverflowed = bufferOverflowed
+            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
-        // 英数キー → バッファリセットのみ（通常の切り替えを邪魔しない）
+        // ── 英数キー: 1度目を飲んで保留 ───────────────────
         if keyCode == eisuKeyCode {
-            resetBuffer()
-            return Unmanaged.passRetained(event)
+            beginEisuHold()
+            return nil
         }
 
         if keyCode == backspaceKeyCode {
@@ -204,11 +240,32 @@ class KeyMonitor {
             } else {
                 buffer.append((keyCode: keyCode, char: chars))
             }
-        } else if keyCode != capsLockKeyCode && keyCode != eisuKeyCode && keyCode != f18KeyCode {
+        } else {
             resetBuffer()
         }
 
         return Unmanaged.passRetained(event)
+    }
+
+    // ── 英数キーの保留 ──────────────────────────────────
+    private func beginEisuHold() {
+        eisuHolding = true
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.eisuHolding else { return }
+            // 2度目が来なかった: 通常の切替として英数を注入し直す
+            self.eisuHolding = false
+            self.eisuHoldTimer = nil
+            self.postSyntheticKey(self.eisuKeyCode)
+            self.resetBuffer()
+        }
+        eisuHoldTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
+    }
+
+    private func cancelEisuHold() {
+        eisuHolding = false
+        eisuHoldTimer?.cancel()
+        eisuHoldTimer = nil
     }
 
     /// バッファに溜めてよい文字か。
@@ -224,25 +281,6 @@ class KeyMonitor {
     private func resetBuffer() {
         buffer.removeAll()
         bufferOverflowed = false
-    }
-
-    /// 救済対象として取り出す。条件を満たさなければ nil を返しバッファは捨てる。
-    private func takeRescuableBuffer() -> [(keyCode: CGKeyCode, char: String)]? {
-        let saved = buffer
-        let overflowed = bufferOverflowed
-        resetBuffer()
-
-        if overflowed {
-            itsLog.error("バッファ上限超過 (>\(self.maxBufferCount)) → 救済しない")
-            return nil
-        }
-        guard saved.count >= rescueThreshold else { return nil }
-        let text = saved.map { $0.char }.joined()
-        guard looksLikeRomaji(text) else {
-            itsLog.error("ローマ字と判定されず救済しない: \(text, privacy: .public)")
-            return nil
-        }
-        return saved
     }
 
     // MARK: - 救済
@@ -271,16 +309,49 @@ class KeyMonitor {
         watchdog = nil
     }
 
-    private func triggerRescue(saved: [(keyCode: CGKeyCode, char: String)], toJapanese: Bool) {
+    /// スナップショットが救済に値するか検証する
+    private func validateRescuable(_ saved: [(keyCode: CGKeyCode, char: String)],
+                                   overflowed: Bool) -> [(keyCode: CGKeyCode, char: String)]? {
+        if overflowed {
+            itsLog.error("バッファ上限超過 (>\(self.maxBufferCount)) → 救済しない")
+            return nil
+        }
+        guard saved.count >= rescueThreshold else { return nil }
+        let text = saved.map { $0.char }.joined()
+        guard looksLikeRomaji(text) else {
+            itsLog.error("ローマ字と判定されず救済しない: \(text, privacy: .public)")
+            return nil
+        }
+        return saved
+    }
+
+    private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)]) {
         beginRescue()
         let romaji = saved.map { $0.char }.joined()
-        let dir = toJapanese ? "E→J" : "J→E"
-        itsLog.error("救済開始 \(dir, privacy: .public) '\(romaji, privacy: .public)' \(saved.count)文字 現IME=\(self.currentSourceID(), privacy: .public)")
+        itsLog.error("救済開始 E→J '\(romaji, privacy: .public)' \(saved.count)文字")
+        rescueToJapanese(saved)
+    }
 
-        if toJapanese {
-            rescueToJapanese(saved)
-        } else {
-            rescueToEnglish(saved)
+    // ── 日本語 → 英語（F10 方式） ──────────────────────────────────
+    // Kotoeri は未確定合成中に F10 を押すと「打った生のローマ字」に変換する。
+    // これを使えば、ライブ変換で表示が何文字になっていようと
+    // 削除数の計算なしで確実に英語へ戻せる。
+    //   F10（英字に変換）→ Return（確定）→ 英数（以降の入力を英語に）
+    // 前提: 未確定合成が開いていること。英数1度目を保留しているのはこのため
+    // （英数を素通しすると合成が確定されて F10 が効かなくなる）。
+    private func rescueToEnglishViaF10() {
+        beginRescue()
+        itsLog.error("救済開始 J→E (F10方式)")
+        postSyntheticKey(f10KeyCode)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.postSyntheticKey(self.returnKeyCode)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.postSyntheticKey(self.eisuKeyCode)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.endRescue()
+                }
+            }
         }
     }
 
@@ -358,24 +429,9 @@ class KeyMonitor {
         rescueToJapanese(saved)
     }
 
-    // ── 日本語 → 英語 ────────────────────────────────────────────────
-    // ライブ変換が有効だと画面上は漢字かな交じりになっており、
-    // 何文字消せばよいかをローマ字から計算することが原理的にできない。
-    // Esc で未確定合成を丸ごと破棄すれば、数を数えずに済む。
-    private func rescueToEnglish(_ saved: [(keyCode: CGKeyCode, char: String)]) {
-        postSyntheticKey(escapeKeyCode)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self = self else { return }
-            self.switchIME(toJapanese: false) { [weak self] in
-                guard let self = self else { return }
-                // 英語レイアウトなので keyCode だけでも正しい ASCII になるが、
-                // ユニコード文字列も併せてセットして、どちらを見るアプリでも合うようにする。
-                self.injectKeys(saved, index: 0, interval: self.injectIntervalASCII, asLiteral: true) {
-                    self.endRescue()
-                }
-            }
-        }
+    /// J→E 救済をテスト駆動する（合成が開いている前提で F10 チェーンを流す）
+    func testRescueToEnglish() {
+        rescueToEnglishViaF10()
     }
 
     // MARK: - イベント注入

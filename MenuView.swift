@@ -15,10 +15,10 @@ struct MenuView: View {
 
             Divider()
 
-            Text("\(appState.keyMonitor.rescueThresholdPublic)文字以上のローマ字入力時:")
+            Text("かなキー2度押し → 日本語に打ち直し")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("Caps Lock → 日本語 / 英語 自動判定")
+            Text("英数キー2度押し → 英語に打ち直し")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

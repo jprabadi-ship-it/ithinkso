@@ -172,6 +172,27 @@ final class SelfTest: NSObject {
             return
         }
 
+        if Self.mode == 5 {
+            // J→E 検証: かなキーで日本語化 → ローマ字注入で合成を作る
+            // → F10+Return+英数 チェーンで英語に戻す
+            itsLog.error("自己テスト: mode5 J→E(F10) 前面=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?", privacy: .public)")
+            postKey(104, flags: [])                 // かな
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self else { return }
+                self.inject(Array(self.sample), index: 0)   // 合成を作る（step3Read には進まず途中で止まる想定はないので流用しない）
+            }
+            // inject 完了後 step3Read が走るのを避けるため、mode5 では
+            // inject のコールバックに頼らず時間で JtoE を起動する
+            let wait = 1.2 + Double(sample.count) * 0.06
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                self?.keyMonitor?.testRescueToEnglish()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self?.finish()
+                }
+            }
+            return
+        }
+
         if Self.mode == 4 {
             // 区間分割ロジックの単体確認（注入なし）
             let segs = KeyMonitor.segment(sample.map { String($0) })
@@ -244,6 +265,7 @@ final class SelfTest: NSObject {
 
     private func inject(_ chars: [Character], index: Int) {
         guard index < chars.count else {
+            if Self.mode == 5 { return }  // mode5 は run() 側のタイマーで続きを駆動する
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.step3Read()
             }
