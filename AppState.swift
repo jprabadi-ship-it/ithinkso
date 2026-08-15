@@ -53,6 +53,7 @@ class AppState: ObservableObject {
             keyMonitor.start()
         }
 
+        #if ITS_DEVTOOLS
         if SelfTest.isEnabled {
             // 自己テスト中は救済ロジック(タップ)を止めておく（注入を自分で拾わないため）
             keyMonitor.stop()
@@ -61,6 +62,7 @@ class AppState: ObservableObject {
                 SelfTest.shared.run()
             }
         }
+        #endif
     }
 
     // App Sandbox 下では AXIsProcessTrusted は常に false を返すため使えない。
@@ -111,6 +113,9 @@ class AppState: ObservableObject {
     }
 }
 
+#if ITS_DEVTOOLS
+// 以下は開発用の自己テスト装置。Debug ビルドにのみ含まれ、
+// App Store に提出する Release ビルドには一切入らない。
 // MARK: - 自己テスト
 //
 // 環境変数 ITS_SELFTEST=1 で起動すると、自前のテキストビューに対して
@@ -353,3 +358,4 @@ final class SelfTest: NSObject {
         return map[c] ?? 0
     }
 }
+#endif

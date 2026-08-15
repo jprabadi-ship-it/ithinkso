@@ -21,13 +21,16 @@ final class StoreManager: ObservableObject {
     @Published private(set) var trialDaysRemaining = StoreManager.trialDays
     @Published private(set) var product: Product?
 
-    /// 開発機で購入済み扱いにするフラグ。
-    /// 設定:   defaults write com.ithinkso.app ITSLicenseOverride "rabadi-dev"
-    /// 解除:   defaults delete com.ithinkso.app ITSLicenseOverride
-    /// クライアント側の判定はどのみち改変可能なので、これは利便性の仕掛けであって
-    /// 保護機構ではない（トライアル起点の UserDefaults と同じ割り切り）
+    /// 開発機で購入済み扱いにするフラグ。Debug ビルドのみ有効で、
+    /// App Store に出す Release ビルドでは常に false になる
+    /// （出荷版に課金の裏口を残さないため）。
+    ///   設定: ITS_SET_DEV=1 で起動 / 解除: ITS_SET_DEV=0 で起動
     var isDevUnlocked: Bool {
-        UserDefaults.standard.string(forKey: "ITSLicenseOverride") == "rabadi-dev"
+        #if ITS_DEVTOOLS
+        return UserDefaults.standard.string(forKey: "ITSLicenseOverride") == "rabadi-dev"
+        #else
+        return false
+        #endif
     }
 
     /// 機能を使ってよい状態か（開発フラグ or 購入済み or トライアル中）
@@ -44,13 +47,14 @@ final class StoreManager: ObservableObject {
 
     init() {
         let ud = UserDefaults.standard
+        #if ITS_DEVTOOLS
         // sandbox コンテナは外部から defaults write できない（EPERM）ため、
-        // 環境変数付きで一度起動するとアプリ自身がフラグを永続化する。
-        //   設定: ITS_SET_DEV=1 で起動 / 解除: ITS_SET_DEV=0 で起動
+        // 環境変数付きで一度起動するとアプリ自身がフラグを永続化する
         if let v = ProcessInfo.processInfo.environment["ITS_SET_DEV"] {
             if v == "1" { ud.set("rabadi-dev", forKey: "ITSLicenseOverride") }
             else { ud.removeObject(forKey: "ITSLicenseOverride") }
         }
+        #endif
         if ud.object(forKey: firstLaunchKey) == nil {
             ud.set(Date(), forKey: firstLaunchKey)
         }

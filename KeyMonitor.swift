@@ -394,6 +394,7 @@ class KeyMonitor {
         "j": 38, "k": 40, "n": 45, "m": 46, "-": 27,
     ]
 
+    #if ITS_DEVTOOLS
     /// 文字列から buffer 相当を組み立てて E→J 救済を実行する。
     /// 前面アプリに対して BS→区間注入まで本番と同じ経路を通る
     func testRescueToJapanese(_ text: String) {
@@ -437,6 +438,7 @@ class KeyMonitor {
             f10Chain()
         }
     }
+    #endif
 
     // MARK: - イベント注入
 
