@@ -9,7 +9,7 @@ class AppState: ObservableObject {
 
     @Published var isEnabled: Bool = true {
         didSet {
-            (isEnabled && store.isEntitled) ? keyMonitor.start() : keyMonitor.stop()
+            isEnabled ? keyMonitor.start() : keyMonitor.stop()
         }
     }
 
@@ -37,22 +37,17 @@ class AppState: ObservableObject {
     }
 
     let keyMonitor = KeyMonitor()
-    let store = StoreManager()
     private var permissionTimer: Timer?
 
     init() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refreshPermissionStatus()
 
-        // トライアル失効・購入で機能を止める/再開する
-        store.onEntitlementChange = { [weak self] in
-            self?.applyEntitlementState()
-        }
-
         if canRun {
             keyMonitor.start()
         }
 
+        #if ITS_DEVTOOLS
         if SelfTest.isEnabled {
             // 自己テスト中は救済ロジック(タップ)を止めておく（注入を自分で拾わないため）
             keyMonitor.stop()
@@ -61,18 +56,15 @@ class AppState: ObservableObject {
                 SelfTest.shared.run()
             }
         }
+        #endif
     }
 
     // App Sandbox 下では AXIsProcessTrusted は常に false を返すため使えない。
     // CGEventTap は ListenEvent、CGEvent.post は PostEvent という別の TCC サービスで、
     // どちらも sandbox 互換。さらに抑止つきタップ（.defaultTap）には
     // ListenEvent だけでなく PostEvent も必要（実測で確認済み）。
-    /// 機能を動かしてよい状態か（権限 + 有効化 + ライセンス）
-    var canRun: Bool { hasInputPermission && isEnabled && store.isEntitled }
-
-    private func applyEntitlementState() {
-        canRun ? keyMonitor.start() : keyMonitor.stop()
-    }
+    /// 機能を動かしてよい状態か（権限 + 有効化）
+    var canRun: Bool { hasInputPermission && isEnabled }
 
     func refreshPermissionStatus() {
         let wasGranted = hasInputPermission
@@ -111,6 +103,9 @@ class AppState: ObservableObject {
     }
 }
 
+#if ITS_DEVTOOLS
+// 以下は開発用の自己テスト装置。Debug ビルドにのみ含まれ、
+// App Store に提出する Release ビルドには一切入らない。
 // MARK: - 自己テスト
 //
 // 環境変数 ITS_SELFTEST=1 で起動すると、自前のテキストビューに対して
@@ -209,10 +204,9 @@ final class SelfTest: NSObject {
         if Self.mode == 4 {
             // 区間分割ロジックの単体確認（注入なし）
             let segs = KeyMonitor.segment(sample.map { String($0) })
-            let chars = Array(sample)
             let desc = segs.map { seg -> String in
-                let t = String(chars[seg.range])
-                return seg.isEnglish ? "[EN:\(t)]" : "[JA:\(t)]"
+                let mark = seg.corrected ? "✱" : ""
+                return seg.isEnglish ? "[EN:\(seg.text)\(mark)]" : "[JA:\(seg.text)\(mark)]"
             }.joined()
             itsLog.error("分割テスト '\(self.sample, privacy: .public)' → \(desc, privacy: .public)")
             finish()
@@ -354,3 +348,4 @@ final class SelfTest: NSObject {
         return map[c] ?? 0
     }
 }
+#endif
