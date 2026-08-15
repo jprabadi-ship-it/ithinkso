@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I think so — プライバシーポリシー / サポート</title>
+<style>
+  :root {
+    --ground: #FBFBFC;
+    --surface: #F2F4F7;
+    --surface-2: #E9EDF3;
+    --ink: #16213A;
+    --muted: #5C6880;
+    --border: #DFE3EA;
+    --accent: #C4552F;
+    --serif: "Hiragino Mincho ProN", "ヒラギノ明朝 ProN", "Yu Mincho", "游明朝", "YuMincho", serif;
+    --sans: "Hiragino Sans", "ヒラギノ角ゴシック", "Hiragino Kaku Gothic ProN", "Yu Gothic", "游ゴシック", "Meiryo", system-ui, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10141C;
+      --surface: #171D28;
+      --surface-2: #1E2634;
+      --ink: #E8EBF0;
+      --muted: #96A0B4;
+      --border: #262F3E;
+      --accent: #E0784E;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10141C;
+    --surface: #171D28;
+    --surface-2: #1E2634;
+    --ink: #E8EBF0;
+    --muted: #96A0B4;
+    --border: #262F3E;
+    --accent: #E0784E;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.9;
+    margin: 0;
+    padding: 0 24px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 44rem; margin: 0 auto; }
+
+  header {
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(30px, 5vw, 42px);
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: 0.01em;
+  }
+  .meta {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .lede {
+    margin: 40px 0 0;
+    font-size: 17px;
+    color: var(--ink);
+  }
+
+  .summary {
+    margin: 32px 0 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .summary-head {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  dl { margin: 0; }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 20px;
+    padding: 13px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row dt { color: var(--muted); font-size: 14.5px; }
+  .row dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .none { color: var(--ink); font-weight: 600; }
+
+  section { margin-top: 52px; }
+  h2 {
+    font-family: var(--serif);
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 600;
+    margin: 28px 0 10px;
+    letter-spacing: 0.02em;
+  }
+  p { margin: 0 0 16px; }
+  p:last-child { margin-bottom: 0; }
+
+  ul { margin: 0 0 16px; padding-left: 0; list-style: none; }
+  li {
+    position: relative;
+    padding-left: 22px;
+    margin-bottom: 12px;
+  }
+  li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 0.82em;
+    width: 7px;
+    height: 1px;
+    background: var(--accent);
+  }
+  li strong { font-weight: 600; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  kbd {
+    font-family: var(--sans);
+    font-size: 0.82em;
+    font-weight: 600;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+
+  .demo {
+    margin: 0 0 16px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 13.5px;
+  }
+  .demo div { padding: 12px 18px; }
+  .demo .before { color: var(--muted); border-bottom: 1px solid var(--border); }
+  .demo .after  { color: var(--ink); font-family: var(--sans); font-size: 15px; }
+
+  a { color: var(--accent); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  .en {
+    margin-top: 60px;
+    padding-top: 32px;
+    border-top: 1px solid var(--border);
+    font-size: 14.5px;
+    color: var(--muted);
+    line-height: 1.75;
+  }
+  .en h2 {
+    font-size: 15px;
+    border: 0;
+    padding: 0;
+    margin-bottom: 12px;
+    color: var(--ink);
+    font-family: var(--sans);
+    letter-spacing: 0.02em;
+  }
+  .en h3 { font-size: 14px; margin: 20px 0 6px; color: var(--ink); }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">I think so — macOS</div>
+  <h1>プライバシーポリシー<br>とサポート</h1>
+  <div class="meta">最終更新 2026-08-15</div>
+</header>
+
+<p class="lede">
+  I think so は、入力モードを間違えて打ってしまった文字列を、かなキーの2度押しで
+  正しいモードに打ち直す macOS 用のメニューバーアプリです。
+  キーボード入力を監視しますが、その内容が端末の外に出ることはありません。
+</p>
+
+<div class="summary">
+  <div class="summary-head">データの取り扱い</div>
+  <dl>
+    <div class="row"><dt>収集する個人情報</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>入力内容の保存</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>外部への送信</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>ネットワーク通信機能</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>第三者への提供</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>広告・解析</dt><dd class="none">なし</dd></div>
+  </dl>
+</div>
+
+<section>
+  <h2><span class="num">01</span>キーボード入力の取り扱い</h2>
+  <p>
+    打ち間違いを打ち直すという機能の性質上、本アプリは macOS の「入力監視」権限を用いて
+    キーボード入力を監視します。取り扱いは以下に限られます。
+  </p>
+  <ul>
+    <li>直近に打鍵された文字列を、打ち直しのために<strong>メモリ上の一時バッファ</strong>にのみ保持します</li>
+    <li>バッファはスペース・Enter・Escape・修飾キー操作のたびに<strong>破棄</strong>されます</li>
+    <li>入力内容が<strong>ディスクに保存されることはありません</strong></li>
+    <li>入力内容が<strong>外部に送信されることはありません</strong>。本アプリにはネットワーク通信の機能自体がありません</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">02</span>必要な権限</h2>
+  <p>初回起動時に2つの許可を求めます。どちらも中核機能の実行に必要です。</p>
+  <ul>
+    <li><strong>入力監視</strong><br>かなキーの2度押しの検出と、直前に打った文字列の記憶に使用します</li>
+    <li><strong>アクセシビリティ</strong><br>打ち直しのためにキー入力イベントを送出します。システム設定では「アクセシビリティ」と表示されますが、使用するのはイベント送出の機能のみで、他アプリの画面内容を読み取ることはありません</li>
+  </ul>
+  <p>許可を与えた後は<strong>アプリの再起動が必要</strong>です。許可しただけでは反映されません。</p>
+</section>
+
+<section>
+  <h2><span class="num">03</span>使い方</h2>
+  <p>入力モードを間違えて打ってしまったら、<kbd>かな</kbd> キーを素早く2回押してください。方向は自動で判定されます。</p>
+
+  <h3>英語モードのまま日本語を打ってしまったとき</h3>
+  <div class="demo">
+    <div class="before">sonocheckma-kuhadokomadegahannidesuka</div>
+    <div class="after">そのcheckマークはどこまでが範囲ですか</div>
+  </div>
+  <p>文中の英単語はそのまま残ります。ローマ字を打ち間違えていた場合も検出して直します。</p>
+
+  <h3>日本語モードのまま英語を打ってしまったとき</h3>
+  <div class="demo">
+    <div class="before">ぎtこっみt</div>
+    <div class="after">gitcommit</div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">04</span>よくある質問</h2>
+  <ul>
+    <li><strong>反応しない</strong><br>メニューバーのアイコンから権限が付与されているか確認してください。許可した直後はアプリの再起動が必要です</li>
+    <li><strong>かなキーがないキーボードを使っている</strong><br>JIS 配列の「かな」キー（キーコード 104）を使用します。US 配列の場合は Karabiner-Elements などで任意のキーに割り当ててください</li>
+    <li><strong>Caps Lock は使えなくなる？</strong><br>いいえ。Caps Lock には一切干渉しません</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">05</span>お問い合わせ</h2>
+  <p>
+    ご質問・不具合の報告は <a href="mailto:jprabadi@gmail.com">jprabadi@gmail.com</a> までお願いします。
+  </p>
+</section>
+
+<div class="en">
+  <h2>English Summary</h2>
+
+  <h3>Privacy</h3>
+  <p>
+    I think so collects no personal information. To provide its retype-rescue
+    feature it monitors keyboard input via the macOS Input Monitoring permission,
+    but the most recent run of typed characters is held only in an in-memory
+    buffer, is discarded on every Space / Return / Escape / modifier key press,
+    is never written to disk, and is never transmitted anywhere. The app contains
+    no networking capability. No data is shared with any third party.
+  </p>
+
+  <h3>Permissions</h3>
+  <p>
+    <strong>Input Monitoring</strong> — to detect the kana-key double press and
+    remember the characters you just typed.
+    <strong>Accessibility</strong> — to post the keystrokes that perform the
+    retype. Only the event-posting capability gated by this permission is used;
+    the app does not read the UI contents of other applications.
+    Restart the app after granting permissions.
+  </p>
+
+  <h3>How to use</h3>
+  <p>
+    When you type in the wrong input mode, press the kana key twice quickly.
+    The text you just typed is deleted and retyped in the correct input mode.
+    The direction is detected automatically.
+  </p>
+
+  <h3>Contact</h3>
+  <p><a href="mailto:jprabadi@gmail.com">jprabadi@gmail.com</a></p>
+</div>
+
+<footer>
+  <span>I think so — macOS</span>
+  <span>gigowat</span>
+</footer>
+
+</div>
+</body>
+</html>

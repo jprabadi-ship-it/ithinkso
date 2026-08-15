@@ -54,6 +54,11 @@ I think so は、その打ち直しを「かなキー2度押し」ひとつで�
 有料化の前に「有料 App 契約」と税務・銀行情報の登録が必要。
 
 ## プライバシーポリシー URL
-https://jprabadi-ship-it.github.io/ithinkso-privacy/
-（リポジトリ: https://github.com/jprabadi-ship-it/ithinkso-privacy — 内容を変えたいときは
-docs/privacy-policy.md を編集してからこのリポジトリの index.md に反映する）
+https://ithinkso.gigowat.com/
+
+## サポート URL
+https://ithinkso.gigowat.com/
+
+同じページにプライバシーポリシー・使い方・FAQ・連絡先をまとめてある。
+ページの実体は docs/site/index.html（クラちゃんのサイトと同じデザインシステム）。
+予備: https://jprabadi-ship-it.github.io/ithinkso-privacy/
