@@ -3,8 +3,8 @@ import Carbon
 import os
 
 /// GUI アプリの print は unified log に乗らないため、追跡は os_log で行う。
-/// 読むとき: /usr/bin/log show --predicate 'subsystem == "com.ithinkso.app"' --last 2m
-let itsLog = Logger(subsystem: "com.ithinkso.app", category: "keymonitor")
+/// 読むとき: /usr/bin/log show --predicate 'subsystem == "com.rabadi.ithinkso"' --last 2m
+let itsLog = Logger(subsystem: "com.rabadi.ithinkso", category: "keymonitor")
 
 class KeyMonitor {
 
