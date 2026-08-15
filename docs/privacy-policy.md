@@ -28,7 +28,7 @@
 
 ### お問い合わせ
 
-jprabadi@gmail.com
+admin@gigowat.com
 
 ## English
 
@@ -55,4 +55,4 @@ No data is shared with any third party.
 
 ### Contact
 
-jprabadi@gmail.com
+admin@gigowat.com
