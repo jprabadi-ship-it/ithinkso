@@ -15,10 +15,17 @@ struct MenuView: View {
 
             Divider()
 
-            Text("かなキー / 右Command の2度押しで打ち直し")
+            Text("英数×2 → 日本語に打ち直し")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("(英語↔日本語は自動判定)")
+            Text("かな×2 → 英語に打ち直し")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Button("直前の入力を日本語に打ち直す") {
+                appState.keyMonitor.rescueNowToJapanese()
+            }
+            Text("(メニューを閉じて1秒後に実行)")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

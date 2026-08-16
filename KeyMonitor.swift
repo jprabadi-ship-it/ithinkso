@@ -30,10 +30,6 @@ class KeyMonitor {
 
     private let eisuKeyCode: CGKeyCode = 102      // JIS 英数キー
     private let kanaKeyCode: CGKeyCode = 104      // JIS かなキー
-    private let rightCommandKeyCode: CGKeyCode = 54  // 右Command（US配列にもある）
-    /// 修飾キーを「単押し」とみなす最大押下時間。
-    /// これより長ければ ⌘C のように修飾キーとして使ったとみなす
-    private let modifierTapMaxDuration: TimeInterval = 0.3
     private let f10KeyCode: CGKeyCode = 109       // F10（Kotoeri: 合成を半角英字に変換）
     private let backspaceKeyCode: CGKeyCode = 51
     private let escapeKeyCode: CGKeyCode = 53
@@ -67,15 +63,14 @@ class KeyMonitor {
     /// 自タップが「自分の注入イベント」として認識した数。タグが機能しているかの確認用
     private var syntheticSeen = 0
 
-    // かな2度押しの状態
+    // かな2度押しの状態（J→E）
     private var kanaFirstTapTime: TimeInterval = 0
     private var kanaTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
     private var kanaTapOverflowed = false
-    // 右Command 2度押しの状態
-    private var rcmdDownTime: TimeInterval = 0
-    /// 押している間に他のキーが押されたか（⌘C などの修飾キー使用）
-    private var rcmdUsedAsModifier = false
-    private var rcmdLastTapTime: TimeInterval = 0
+    // 英数2度押しの状態（E→J）
+    private var eisuFirstTapTime: TimeInterval = 0
+    private var eisuTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
+    private var eisuTapOverflowed = false
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -151,72 +146,71 @@ class KeyMonitor {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
-        // ── 右Command 2度押し（かなキーが無い配列でも使える） ──
-        // Command 自体は素通しする。単独では何も起きないキーなので副作用がない
         if type == .flagsChanged {
-            if keyCode == rightCommandKeyCode {
-                let now = ProcessInfo.processInfo.systemUptime
-                if event.flags.contains(.maskCommand) {
-                    rcmdDownTime = now
-                    rcmdUsedAsModifier = false
-                } else {
-                    let held = now - rcmdDownTime
-                    let wasTap = rcmdDownTime > 0 && !rcmdUsedAsModifier
-                                 && held < modifierTapMaxDuration
-                    rcmdDownTime = 0
-                    if wasTap {
-                        if now - rcmdLastTapTime < doubleTapWindow {
-                            rcmdLastTapTime = 0
-                            triggerFromRightCommand()
-                        } else {
-                            rcmdLastTapTime = now
-                        }
-                    }
-                }
-            }
             return Unmanaged.passRetained(event)
         }
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
-        // 右Command を押している最中に何かキーが押された = ⌘C などの修飾キー使用。
-        // 離しても「単押し」とみなさない
-        if rcmdDownTime > 0 { rcmdUsedAsModifier = true }
-
-        // ── かなキー2度押し: 打ち間違い救済 ──
+        // ── トリガー体系 ──────────────────────────────────
         //
-        // 方向は常に「英語モードで打ったローマ字 → 日本語」に固定する。
-        // 以前は入力ソースを見て自動判定していたが、
-        // isCurrentlyJapaneseIME() が返すのは自プロセスの入力コンテキストで、
-        // 前面アプリの実態と一致しない。バックグラウンドアプリから
-        // 前面アプリの入力ソースを知る手段が macOS に無いため直しようがない。
-        // 実測（MacBook）では英語モードなのに「日本語」と判定され、
-        // 毎回 J→E を実行して何も起きなかった。
-        // 使う人は英語モードで打ち始めるのが常なので E→J に固定する。
-        // 英数キーはトリガーに使わない。ユーザーのキーボード(QMK/VIA)の
-        // tap-dance が素早い2度目を食べて OS に届かないことが実測で判明したため。
-        if keyCode == kanaKeyCode {
+        // 方向はジェスチャで明示する。入力ソースの自動判定はしない
+        // （バックグラウンドから前面アプリの入力ソースを知る手段が無く、
+        //   実測で毎回誤判定したため）。
+        //
+        //   英数×2 → E→J: 英語モードで打ってしまったローマ字を日本語に
+        //   かな×2 → J→E: 日本語モードで打ってしまった英語を元に戻す(F10)
+        //
+        // この割り当ては1度目の素通しがちょうど無害になる:
+        //   ・E→J を使う場面は英語モード → 英数の1度目は何も起こさない
+        //   ・J→E を使う場面は日本語モード → かなの1度目は何も起こさず、
+        //     未確定合成も開いたまま保たれる（F10 がそのまま効く）
+        //
+        // MacBook では Karabiner で 左⌘タップ=英数 / 右⌘タップ=かな に
+        // している想定。⌘の2度タップがそのままトリガーになる。
+
+        // 英数×2 → E→J
+        if keyCode == eisuKeyCode {
             let now = ProcessInfo.processInfo.systemUptime
-            if now - kanaFirstTapTime < doubleTapWindow {
-                // 2度目 → 救済。このイベントは飲む
-                kanaFirstTapTime = 0
-                let snapshot = kanaTapSnapshot
-                kanaTapSnapshot = []
-                if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
-                    triggerRescueToJapanese(saved, skipSwitch: true)
+            if now - eisuFirstTapTime < doubleTapWindow {
+                eisuFirstTapTime = 0
+                let snapshot = eisuTapSnapshot
+                eisuTapSnapshot = []
+                itsLog.error("英数×2 検出 (buffer=\(snapshot.count)文字) → E→J")
+                if let saved = validateRescuable(snapshot, overflowed: eisuTapOverflowed) {
+                    // まだ英語モードのはずなので、救済側で日本語へ切り替える
+                    triggerRescueToJapanese(saved, skipSwitch: false)
                 }
                 return nil
             }
-            // 1度目: 方向判定材料とバッファを退避してから素通し
-            kanaFirstTapTime = now
-            kanaTapSnapshot = buffer
-            kanaTapOverflowed = bufferOverflowed
+            // 1度目: バッファを退避して素通し（英語モードでは何も起きない）
+            eisuFirstTapTime = now
+            eisuTapSnapshot = buffer
+            eisuTapOverflowed = bufferOverflowed
             resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
-        // 英数キー → バッファリセットのみ（通常の切替を邪魔しない）
-        if keyCode == eisuKeyCode {
+        // かな×2 → J→E
+        if keyCode == kanaKeyCode {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - kanaFirstTapTime < doubleTapWindow {
+                kanaFirstTapTime = 0
+                let snapshot = kanaTapSnapshot
+                kanaTapSnapshot = []
+                if snapshot.isEmpty {
+                    itsLog.error("かな×2 検出 (buffer空) → 救済対象なし")
+                } else {
+                    itsLog.error("かな×2 検出 (buffer=\(snapshot.count)文字) → J→E (F10)")
+                    rescueToEnglishViaF10()
+                }
+                return nil
+            }
+            // 1度目: バッファを退避して素通し（日本語モードでは何も起きず、
+            // 未確定合成もそのまま残る）
+            kanaFirstTapTime = now
+            kanaTapSnapshot = buffer
+            kanaTapOverflowed = bufferOverflowed
             resetBuffer()
             return Unmanaged.passRetained(event)
         }
@@ -311,15 +305,19 @@ class KeyMonitor {
         return saved
     }
 
-    /// 右Command 2度押しからの起動。
-    /// かなキーと違い IME は切り替わらないので、E→J では自分で切り替える
-    private func triggerFromRightCommand() {
+    /// メニューから起動する E→J（キーボードにトリガーキーが無い環境向け。
+    /// App Review の審査員は US 配列で英数/かなキーが無いため、これが再現手段になる）。
+    /// メニューを閉じてフォーカスが戻るのを待ってから実行する
+    func rescueNowToJapanese() {
         let snapshot = buffer
         let overflowed = bufferOverflowed
         resetBuffer()
-        itsLog.error("右Command×2 検出 (buffer=\(snapshot.count)文字)")
-        if let saved = validateRescuable(snapshot, overflowed: overflowed) {
-            triggerRescueToJapanese(saved, skipSwitch: false)
+        itsLog.error("メニューから実行 (buffer=\(snapshot.count)文字) → E→J")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            if let saved = self.validateRescuable(snapshot, overflowed: overflowed) {
+                self.triggerRescueToJapanese(saved, skipSwitch: false)
+            }
         }
     }
 
