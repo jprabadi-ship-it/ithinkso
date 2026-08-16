@@ -72,7 +72,7 @@ Xcode の Organizer（Window → Organizer）か Transporter.app に
 |---|---|
 | 説明文・キーワード | `docs/appstore-description-ja.md` |
 | 審査員向けノート | `docs/appstore-review-notes.md` を **App Review Information の Notes に貼る** |
-| プライバシーポリシー URL | https://jprabadi-ship-it.github.io/ithinkso-privacy/ |
+| プライバシーポリシー URL / サポート URL | https://ithinkso.gigowat.com/ |
 | 価格 | 無料（後日 ¥500 に変更予定） |
 | カテゴリ | ユーティリティ |
 
