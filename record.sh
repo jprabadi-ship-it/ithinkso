@@ -48,10 +48,10 @@ cat <<'NOTE'
 【録画する内容】⌘⇧5 で画面収録
   ・アプリの起動から始めること（審査の要求事項）
   ・メニューバーのアイコンとメニューを見せる
-  ・TextEdit で英語モードのまま次を入力し、かなキーを素早く2回:
+  ・TextEdit で英語モードのまま次を入力し、右Commandを素早く2回:
       sonocheckma-kuhadokomadegahannidesuka
     → 「そのcheckマークはどこまでが範囲ですか」になる
-  ・日本語モードで gitcommit と入力し、かなキーを素早く2回
+  ・日本語モードで gitcommit と入力し、右Commandを素早く2回
     → 英字 gitcommit に戻る
   ・権限ダイアログが出る場面があれば含める
 

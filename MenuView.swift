@@ -15,7 +15,7 @@ struct MenuView: View {
 
             Divider()
 
-            Text("かなキー2度押し → 打ち間違いを打ち直し")
+            Text("かなキー / 右Command の2度押しで打ち直し")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Text("(英語↔日本語は自動判定)")

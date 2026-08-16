@@ -30,6 +30,10 @@ class KeyMonitor {
 
     private let eisuKeyCode: CGKeyCode = 102      // JIS 英数キー
     private let kanaKeyCode: CGKeyCode = 104      // JIS かなキー
+    private let rightCommandKeyCode: CGKeyCode = 54  // 右Command（US配列にもある）
+    /// 修飾キーを「単押し」とみなす最大押下時間。
+    /// これより長ければ ⌘C のように修飾キーとして使ったとみなす
+    private let modifierTapMaxDuration: TimeInterval = 0.3
     private let f10KeyCode: CGKeyCode = 109       // F10（Kotoeri: 合成を半角英字に変換）
     private let backspaceKeyCode: CGKeyCode = 51
     private let escapeKeyCode: CGKeyCode = 53
@@ -69,6 +73,11 @@ class KeyMonitor {
     private var kanaTapOverflowed = false
     /// 1度目のかな押下時点で入力ソースが日本語だったか（方向判定に使う）
     private var kanaTapWasJapanese = false
+    // 右Command 2度押しの状態
+    private var rcmdDownTime: TimeInterval = 0
+    /// 押している間に他のキーが押されたか（⌘C などの修飾キー使用）
+    private var rcmdUsedAsModifier = false
+    private var rcmdLastTapTime: TimeInterval = 0
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -144,11 +153,37 @@ class KeyMonitor {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
+        // ── 右Command 2度押し（かなキーが無い配列でも使える） ──
+        // Command 自体は素通しする。単独では何も起きないキーなので副作用がない
         if type == .flagsChanged {
+            if keyCode == rightCommandKeyCode {
+                let now = ProcessInfo.processInfo.systemUptime
+                if event.flags.contains(.maskCommand) {
+                    rcmdDownTime = now
+                    rcmdUsedAsModifier = false
+                } else {
+                    let held = now - rcmdDownTime
+                    let wasTap = rcmdDownTime > 0 && !rcmdUsedAsModifier
+                                 && held < modifierTapMaxDuration
+                    rcmdDownTime = 0
+                    if wasTap {
+                        if now - rcmdLastTapTime < doubleTapWindow {
+                            rcmdLastTapTime = 0
+                            triggerFromRightCommand()
+                        } else {
+                            rcmdLastTapTime = now
+                        }
+                    }
+                }
+            }
             return Unmanaged.passRetained(event)
         }
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
+
+        // 右Command を押している最中に何かキーが押された = ⌘C などの修飾キー使用。
+        // 離しても「単押し」とみなさない
+        if rcmdDownTime > 0 { rcmdUsedAsModifier = true }
 
         // ── かなキー2度押し: 打ち間違い救済（方向自動判定） ──
         // 1度目の時点の入力ソースで方向を決める:
@@ -278,6 +313,26 @@ class KeyMonitor {
             return nil
         }
         return saved
+    }
+
+    /// 右Command 2度押しからの起動。
+    /// かなキーと違い IME は切り替わらないので、E→J では自分で切り替える
+    private func triggerFromRightCommand() {
+        let wasJapanese = isCurrentlyJapaneseIME()
+        let snapshot = buffer
+        let overflowed = bufferOverflowed
+        resetBuffer()
+        itsLog.error("右Command×2 検出 (現IME=\(wasJapanese ? "日本語" : "英語", privacy: .public) buffer=\(snapshot.count)文字)")
+
+        if wasJapanese {
+            if snapshot.isEmpty {
+                itsLog.error("右Command×2 (日本語, buffer空) → 救済対象なし")
+            } else {
+                rescueToEnglishViaF10()
+            }
+        } else if let saved = validateRescuable(snapshot, overflowed: overflowed) {
+            triggerRescueToJapanese(saved, skipSwitch: false)
+        }
     }
 
     private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
