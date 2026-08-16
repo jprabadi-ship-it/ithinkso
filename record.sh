@@ -51,8 +51,7 @@ cat <<'NOTE'
   ・TextEdit で英語モードのまま次を入力し、右Commandを素早く2回:
       sonocheckma-kuhadokomadegahannidesuka
     → 「そのcheckマークはどこまでが範囲ですか」になる
-  ・日本語モードで gitcommit と入力し、右Commandを素早く2回
-    → 英字 gitcommit に戻る
+      → 英字 gitcommit に戻る
   ・権限ダイアログが出る場面があれば含める
 
   1〜2分で十分です。

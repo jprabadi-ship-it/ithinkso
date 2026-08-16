@@ -54,10 +54,8 @@ System Settings > Keyboard > Text Input, in addition to ABC.
 4. The ASCII text is deleted and retyped through the Japanese IME,
    producing 「そのcheckマークはどこまでが範囲ですか」 (the English word
    "check" is preserved; the rest becomes Japanese).
-5. Reverse direction: with the Japanese input source active, type
-   `gitcommit` (it appears as kana composition), then double-tap the
-   right Command key again. The composition is converted back to the
-   literal romaji "gitcommit" and the input source switches to ABC.
+The app only performs this one direction (English input source →
+Japanese). It does not attempt the reverse.
 
 ## App Sandbox
 

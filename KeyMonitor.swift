@@ -71,8 +71,6 @@ class KeyMonitor {
     private var kanaFirstTapTime: TimeInterval = 0
     private var kanaTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
     private var kanaTapOverflowed = false
-    /// 1度目のかな押下時点で入力ソースが日本語だったか（方向判定に使う）
-    private var kanaTapWasJapanese = false
     // 右Command 2度押しの状態
     private var rcmdDownTime: TimeInterval = 0
     /// 押している間に他のキーが押されたか（⌘C などの修飾キー使用）
@@ -185,10 +183,16 @@ class KeyMonitor {
         // 離しても「単押し」とみなさない
         if rcmdDownTime > 0 { rcmdUsedAsModifier = true }
 
-        // ── かなキー2度押し: 打ち間違い救済（方向自動判定） ──
-        // 1度目の時点の入力ソースで方向を決める:
-        //   ABC だった → 英語モードでローマ字を打っていた → E→J
-        //   日本語だった → 日本語モードで英語を打っていた → J→E (F10)
+        // ── かなキー2度押し: 打ち間違い救済 ──
+        //
+        // 方向は常に「英語モードで打ったローマ字 → 日本語」に固定する。
+        // 以前は入力ソースを見て自動判定していたが、
+        // isCurrentlyJapaneseIME() が返すのは自プロセスの入力コンテキストで、
+        // 前面アプリの実態と一致しない。バックグラウンドアプリから
+        // 前面アプリの入力ソースを知る手段が macOS に無いため直しようがない。
+        // 実測（MacBook）では英語モードなのに「日本語」と判定され、
+        // 毎回 J→E を実行して何も起きなかった。
+        // 使う人は英語モードで打ち始めるのが常なので E→J に固定する。
         // 英数キーはトリガーに使わない。ユーザーのキーボード(QMK/VIA)の
         // tap-dance が素早い2度目を食べて OS に届かないことが実測で判明したため。
         if keyCode == kanaKeyCode {
@@ -198,21 +202,13 @@ class KeyMonitor {
                 kanaFirstTapTime = 0
                 let snapshot = kanaTapSnapshot
                 kanaTapSnapshot = []
-                if kanaTapWasJapanese {
-                    // J→E: 未確定合成が開いていれば F10 で生ローマ字に戻す
-                    if snapshot.isEmpty {
-                        itsLog.error("かな×2 (日本語, buffer空) → 救済対象なし")
-                    } else {
-                        rescueToEnglishViaF10()
-                    }
-                } else if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
+                if let saved = validateRescuable(snapshot, overflowed: kanaTapOverflowed) {
                     triggerRescueToJapanese(saved, skipSwitch: true)
                 }
                 return nil
             }
             // 1度目: 方向判定材料とバッファを退避してから素通し
             kanaFirstTapTime = now
-            kanaTapWasJapanese = isCurrentlyJapaneseIME()
             kanaTapSnapshot = buffer
             kanaTapOverflowed = bufferOverflowed
             resetBuffer()
@@ -318,19 +314,11 @@ class KeyMonitor {
     /// 右Command 2度押しからの起動。
     /// かなキーと違い IME は切り替わらないので、E→J では自分で切り替える
     private func triggerFromRightCommand() {
-        let wasJapanese = isCurrentlyJapaneseIME()
         let snapshot = buffer
         let overflowed = bufferOverflowed
         resetBuffer()
-        itsLog.error("右Command×2 検出 (現IME=\(wasJapanese ? "日本語" : "英語", privacy: .public) buffer=\(snapshot.count)文字)")
-
-        if wasJapanese {
-            if snapshot.isEmpty {
-                itsLog.error("右Command×2 (日本語, buffer空) → 救済対象なし")
-            } else {
-                rescueToEnglishViaF10()
-            }
-        } else if let saved = validateRescuable(snapshot, overflowed: overflowed) {
+        itsLog.error("右Command×2 検出 (buffer=\(snapshot.count)文字)")
+        if let saved = validateRescuable(snapshot, overflowed: overflowed) {
             triggerRescueToJapanese(saved, skipSwitch: false)
         }
     }
