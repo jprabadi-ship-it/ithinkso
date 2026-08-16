@@ -5,9 +5,10 @@
 "I think so" is a menu bar utility for Japanese users who type with two
 input modes (Japanese IME and English). When the user types in the wrong
 mode (e.g., Japanese romaji while still in English mode), the text comes
-out garbled. The app lets the user double-tap the right Command key (or the JIS kana
-key) to have the mistyped text deleted and retyped in the correct input
-mode.
+out garbled. The app lets the user double-tap the left Command key to have the
+mistyped text deleted and retyped through the Japanese IME. A double-tap
+of the right Command key performs the reverse (restoring English typed
+while the Japanese IME was active).
 
 This is the app's single, entire function. It has no network capability,
 no data persistence, and no UI beyond a menu bar item.
