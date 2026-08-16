@@ -30,6 +30,8 @@ class KeyMonitor {
 
     private let eisuKeyCode: CGKeyCode = 102      // JIS 英数キー
     private let kanaKeyCode: CGKeyCode = 104      // JIS かなキー
+    private let leftCommandKeyCode: CGKeyCode = 55   // 左⌘
+    private let rightCommandKeyCode: CGKeyCode = 54  // 右⌘
     private let f10KeyCode: CGKeyCode = 109       // F10（Kotoeri: 合成を半角英字に変換）
     private let backspaceKeyCode: CGKeyCode = 51
     private let escapeKeyCode: CGKeyCode = 53
@@ -71,6 +73,15 @@ class KeyMonitor {
     private var eisuFirstTapTime: TimeInterval = 0
     private var eisuTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
     private var eisuTapOverflowed = false
+    // ⌘単押しタップの状態（左⌘=E→J / 右⌘=J→E）
+    private var lcmdDownTime: TimeInterval = 0
+    private var rcmdDownTime: TimeInterval = 0
+    /// ⌘を押している間に他のキーが押されたか（⌘C などの修飾キー使用）
+    private var cmdUsedAsModifier = false
+    private var lcmdLastTapTime: TimeInterval = 0
+    private var rcmdLastTapTime: TimeInterval = 0
+    /// 修飾キーを「単押し」とみなす最大押下時間
+    private let modifierTapMaxDuration: TimeInterval = 0.3
 
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
@@ -146,11 +157,47 @@ class KeyMonitor {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
+        // ── ⌘の2度タップ（US 配列でも押せる主トリガー） ──
+        //   左⌘×2 → E→J / 右⌘×2 → J→E
+        // MacBook では Karabiner で 左⌘タップ=英数 / 右⌘タップ=かな にして
+        // いても、raw の⌘イベント自体は届くのでそのまま動く。
+        // Karabiner が付加した英数/かなイベントで下の英数/かなトリガーも
+        // 発火しうるが、先に始まった救済の isRescuing ガードが後続を飲む。
         if type == .flagsChanged {
+            let now = ProcessInfo.processInfo.systemUptime
+            if keyCode == leftCommandKeyCode || keyCode == rightCommandKeyCode {
+                let isLeft = (keyCode == leftCommandKeyCode)
+                if event.flags.contains(.maskCommand) {
+                    if isLeft { lcmdDownTime = now } else { rcmdDownTime = now }
+                    cmdUsedAsModifier = false
+                } else {
+                    let downTime = isLeft ? lcmdDownTime : rcmdDownTime
+                    if isLeft { lcmdDownTime = 0 } else { rcmdDownTime = 0 }
+                    let wasTap = downTime > 0 && !cmdUsedAsModifier
+                                 && (now - downTime) < modifierTapMaxDuration
+                    if wasTap {
+                        let last = isLeft ? lcmdLastTapTime : rcmdLastTapTime
+                        if now - last < doubleTapWindow {
+                            if isLeft {
+                                lcmdLastTapTime = 0
+                                fireEtoJ(reason: "左⌘×2")
+                            } else {
+                                rcmdLastTapTime = 0
+                                fireJtoE(reason: "右⌘×2")
+                            }
+                        } else {
+                            if isLeft { lcmdLastTapTime = now } else { rcmdLastTapTime = now }
+                        }
+                    }
+                }
+            }
             return Unmanaged.passRetained(event)
         }
 
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
+
+        // ⌘を押している最中のキー押下 = ⌘C などの修飾キー使用。タップ扱いにしない
+        if lcmdDownTime > 0 || rcmdDownTime > 0 { cmdUsedAsModifier = true }
 
         // ── トリガー体系 ──────────────────────────────────
         //
@@ -169,18 +216,14 @@ class KeyMonitor {
         // MacBook では Karabiner で 左⌘タップ=英数 / 右⌘タップ=かな に
         // している想定。⌘の2度タップがそのままトリガーになる。
 
-        // 英数×2 → E→J
+        // 英数×2 → E→J（Karabiner なしの JIS 向け。方向の対応は⌘と同じ）
         if keyCode == eisuKeyCode {
             let now = ProcessInfo.processInfo.systemUptime
             if now - eisuFirstTapTime < doubleTapWindow {
                 eisuFirstTapTime = 0
                 let snapshot = eisuTapSnapshot
                 eisuTapSnapshot = []
-                itsLog.error("英数×2 検出 (buffer=\(snapshot.count)文字) → E→J")
-                if let saved = validateRescuable(snapshot, overflowed: eisuTapOverflowed) {
-                    // まだ英語モードのはずなので、救済側で日本語へ切り替える
-                    triggerRescueToJapanese(saved, skipSwitch: false)
-                }
+                fireEtoJ(reason: "英数×2", snapshot: snapshot, overflowed: eisuTapOverflowed)
                 return nil
             }
             // 1度目: バッファを退避して素通し（英語モードでは何も起きない）
@@ -198,12 +241,7 @@ class KeyMonitor {
                 kanaFirstTapTime = 0
                 let snapshot = kanaTapSnapshot
                 kanaTapSnapshot = []
-                if snapshot.isEmpty {
-                    itsLog.error("かな×2 検出 (buffer空) → 救済対象なし")
-                } else {
-                    itsLog.error("かな×2 検出 (buffer=\(snapshot.count)文字) → J→E (F10)")
-                    rescueToEnglishViaF10()
-                }
+                fireJtoE(reason: "かな×2", snapshot: snapshot)
                 return nil
             }
             // 1度目: バッファを退避して素通し（日本語モードでは何も起きず、
@@ -303,6 +341,32 @@ class KeyMonitor {
             return nil
         }
         return saved
+    }
+
+    /// E→J を発火する。snapshot 省略時は現在のバッファを使う（⌘タップ経由）
+    private func fireEtoJ(reason: String,
+                          snapshot: [(keyCode: CGKeyCode, char: String)]? = nil,
+                          overflowed: Bool? = nil) {
+        let saved = snapshot ?? buffer
+        let over = overflowed ?? bufferOverflowed
+        if snapshot == nil { resetBuffer() }
+        itsLog.error("\(reason, privacy: .public) 検出 (buffer=\(saved.count)文字) → E→J")
+        if let ok = validateRescuable(saved, overflowed: over) {
+            triggerRescueToJapanese(ok, skipSwitch: false)
+        }
+    }
+
+    /// J→E を発火する（F10 方式）。buffer は「最近打鍵があったか」の確認にだけ使う
+    private func fireJtoE(reason: String,
+                          snapshot: [(keyCode: CGKeyCode, char: String)]? = nil) {
+        let saved = snapshot ?? buffer
+        if snapshot == nil { resetBuffer() }
+        if saved.isEmpty {
+            itsLog.error("\(reason, privacy: .public) 検出 (buffer空) → 救済対象なし")
+        } else {
+            itsLog.error("\(reason, privacy: .public) 検出 (buffer=\(saved.count)文字) → J→E (F10)")
+            rescueToEnglishViaF10()
+        }
     }
 
     /// メニューから起動する E→J（キーボードにトリガーキーが無い環境向け。
