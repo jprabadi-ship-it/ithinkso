@@ -32,6 +32,7 @@ class KeyMonitor {
     private let kanaKeyCode: CGKeyCode = 104      // JIS かなキー
     private let leftCommandKeyCode: CGKeyCode = 55   // 左⌘
     private let rightCommandKeyCode: CGKeyCode = 54  // 右⌘
+    private let leftOptionKeyCode: CGKeyCode = 58    // 左⌥（QMK系で親指キーが⌥+英数の構成がある）
     private let f10KeyCode: CGKeyCode = 109       // F10（Kotoeri: 合成を半角英字に変換）
     private let backspaceKeyCode: CGKeyCode = 51
     private let escapeKeyCode: CGKeyCode = 53
@@ -165,9 +166,11 @@ class KeyMonitor {
         // 発火しうるが、先に始まった救済の isRescuing ガードが後続を飲む。
         if type == .flagsChanged {
             let now = ProcessInfo.processInfo.systemUptime
-            if keyCode == leftCommandKeyCode || keyCode == rightCommandKeyCode {
-                let isLeft = (keyCode == leftCommandKeyCode)
-                if event.flags.contains(.maskCommand) {
+            if keyCode == leftCommandKeyCode || keyCode == rightCommandKeyCode
+               || keyCode == leftOptionKeyCode {
+                let isLeft = (keyCode != rightCommandKeyCode)
+                let mask: CGEventFlags = (keyCode == leftOptionKeyCode) ? .maskAlternate : .maskCommand
+                if event.flags.contains(mask) {
                     if isLeft { lcmdDownTime = now } else { rcmdDownTime = now }
                     cmdUsedAsModifier = false
                 } else {
@@ -180,7 +183,7 @@ class KeyMonitor {
                         if now - last < doubleTapWindow {
                             if isLeft {
                                 lcmdLastTapTime = 0
-                                fireEtoJ(reason: "左⌘×2")
+                                fireEtoJ(reason: keyCode == leftOptionKeyCode ? "左⌥×2" : "左⌘×2")
                             } else {
                                 rcmdLastTapTime = 0
                                 fireJtoE(reason: "右⌘×2")
@@ -343,24 +346,47 @@ class KeyMonitor {
         return saved
     }
 
-    /// E→J を発火する。snapshot 省略時は現在のバッファを使う（⌘タップ経由）
+    /// E→J を発火する。snapshot 省略時は現在のバッファを使う（⌘/⌥タップ経由）。
+    ///
+    /// ⌥/⌘タップに英数が載っている環境では、1度目のタップに付随する英数が
+    /// 先にバッファを英数側スナップショットへ退避してしまう（イベント順:
+    /// ⌥↓↑→英数↓→⌥↓↑）。そのため発火時にバッファが空なら、直近の
+    /// 英数スナップショットから拾う。
     private func fireEtoJ(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil,
                           overflowed: Bool? = nil) {
-        let saved = snapshot ?? buffer
-        let over = overflowed ?? bufferOverflowed
-        if snapshot == nil { resetBuffer() }
+        var saved = snapshot ?? buffer
+        var over = overflowed ?? bufferOverflowed
+        if snapshot == nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            if saved.isEmpty, !eisuTapSnapshot.isEmpty, now - eisuFirstTapTime < 1.0 {
+                saved = eisuTapSnapshot
+                over = eisuTapOverflowed
+                eisuTapSnapshot = []
+                eisuFirstTapTime = 0
+            }
+            resetBuffer()
+        }
         itsLog.error("\(reason, privacy: .public) 検出 (buffer=\(saved.count)文字) → E→J")
         if let ok = validateRescuable(saved, overflowed: over) {
             triggerRescueToJapanese(ok, skipSwitch: false)
         }
     }
 
-    /// J→E を発火する（F10 方式）。buffer は「最近打鍵があったか」の確認にだけ使う
+    /// J→E を発火する（F10 方式）。buffer は「最近打鍵があったか」の確認にだけ使う。
+    /// ⌘タップにかなが載っている環境向けに、E→J と同じスナップショット救済を行う
     private func fireJtoE(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil) {
-        let saved = snapshot ?? buffer
-        if snapshot == nil { resetBuffer() }
+        var saved = snapshot ?? buffer
+        if snapshot == nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            if saved.isEmpty, !kanaTapSnapshot.isEmpty, now - kanaFirstTapTime < 1.0 {
+                saved = kanaTapSnapshot
+                kanaTapSnapshot = []
+                kanaFirstTapTime = 0
+            }
+            resetBuffer()
+        }
         if saved.isEmpty {
             itsLog.error("\(reason, privacy: .public) 検出 (buffer空) → 救済対象なし")
         } else {
