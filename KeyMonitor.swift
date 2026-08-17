@@ -146,6 +146,18 @@ class KeyMonitor {
     //   1度目は素通し（通常の切替として働く）、2度目を飲んで救済。
     //   英数 / Caps Lock / F18 / Hyper はすべて通常機能のまま
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // OS がタップを止めたら必ず再有効化する。
+        // コールバックが遅れたとき（.tapDisabledByTimeout）やスリープ復帰などで
+        // macOS はタップを一方的に無効化する。ここで戻さないとアプリは
+        // 生きたまま無反応になり、再起動するまで気づけない。
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                itsLog.error("event tap が OS に無効化されたため再有効化した (type=\(type.rawValue))")
+            }
+            return Unmanaged.passRetained(event)
+        }
+
         // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
             syntheticSeen += 1
