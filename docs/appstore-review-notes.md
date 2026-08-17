@@ -40,9 +40,10 @@ posts events on its own initiative.
 
 ## How to test
 
-No special keyboard is required: the trigger is a double-tap of the
-right Command key, which exists on every Mac keyboard layout.
-(The JIS kana key also works, for users who have one.)
+No special keyboard is required: the triggers are double-taps of the
+Command keys, which exist on every Mac keyboard layout.
+Left Command = retype as Japanese, right Command = restore as English.
+(The JIS eisu/kana keys also work, for users who have them.)
 
 Requirements: the "Japanese - Romaji" input source enabled in
 System Settings > Keyboard > Text Input, in addition to ABC.
@@ -51,12 +52,18 @@ System Settings > Keyboard > Text Input, in addition to ABC.
    Accessibility when prompted, then relaunch if needed).
 2. In TextEdit, with the ABC input source active, type:
    `sonocheckma-kuhadokomadegahannidesuka`
-3. Double-tap the right Command key (twice within 0.35 s).
+3. Double-tap the left Command key (twice within 0.35 s).
 4. The ASCII text is deleted and retyped through the Japanese IME,
    producing 「そのcheckマークはどこまでが範囲ですか」 (the English word
    "check" is preserved; the rest becomes Japanese).
-The app only performs this one direction (English input source →
-Japanese). It does not attempt the reverse.
+5. Reverse direction: with the Japanese input source active, type
+   `gitcommit` (it appears as a kana composition), then double-tap the
+   right Command key. It is restored to the literal romaji "gitcommit"
+   and the input source switches back to ABC.
+
+If using a mouse only, the menu bar item「直前の入力を日本語に打ち直す」
+performs step 3 without a keyboard gesture (it fires one second after
+the menu closes, so the target text field can regain focus).
 
 ## App Sandbox
 
