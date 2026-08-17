@@ -1,0 +1,42 @@
+<meta charset="utf-8">
+<link rel="stylesheet" href="_base.css">
+<style>
+  .pair { display: flex; align-items: center; gap: 30px; }
+  .pair .box { flex: 1; }
+  .pair .box.result { flex: 1.05; }
+  .block { margin-top: 70px; }
+  .footer { margin-top: 100px; }
+  .arrow-h { flex: none; }
+</style>
+
+<div class="page">
+  <h1>打ち間違いも、逆方向も</h1>
+
+  <div class="block">
+    <div class="label strong">ローマ字を打ち間違えていても直す</div>
+    <div class="pair">
+      <div class="box"><span class="mono">sonotuskiwomita</span></div>
+      <svg class="arrow-h" width="76" height="34" viewBox="0 0 76 34" fill="none">
+        <rect x="0" y="12" width="52" height="10" fill="#DF8D3B"/>
+        <path d="M74 17 L48 2 L48 32 Z" fill="#DF8D3B"/>
+      </svg>
+      <div class="box result"><span class="jp">その月を見た</span></div>
+    </div>
+    <div class="caption">tsuki の打ち間違いを検出して修復</div>
+  </div>
+
+  <div class="block">
+    <div class="label strong">日本語モードで打った英語も戻せる</div>
+    <div class="pair">
+      <div class="box"><span class="jp" style="color:#8A8A8A">ぎtこっみt</span></div>
+      <svg class="arrow-h" width="76" height="34" viewBox="0 0 76 34" fill="none">
+        <rect x="0" y="12" width="52" height="10" fill="#DF8D3B"/>
+        <path d="M74 17 L48 2 L48 32 Z" fill="#DF8D3B"/>
+      </svg>
+      <div class="box result"><span class="mono">gitcommit</span></div>
+    </div>
+    <div class="caption">右⌘ 2度押しで、打った通りのローマ字に戻す</div>
+  </div>
+
+  <div class="footer">メニューバーに常駐 / 設定不要 / 入力内容は端末の外に出ません</div>
+</div>
