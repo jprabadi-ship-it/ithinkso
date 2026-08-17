@@ -46,21 +46,32 @@ cat <<'NOTE'
   3. ★アプリを再起動する（許可しただけでは反映されません）
 
 【録画する内容】⌘⇧5 で画面収録
+  ・★先に TextEdit のフォントを 24〜36pt に大きくしておく
+    （縮小しても文字が読めるように。審査員が読めないと意味がない）
   ・アプリの起動から始めること（審査の要求事項）
   ・メニューバーのアイコンとメニューを見せる
-  ・TextEdit で英語モードのまま次を入力し、左⌘を素早く2回:
+  ・E→J: TextEdit で英語モードのまま次を入力し、左⌘を素早く2回:
       sonocheckma-kuhadokomadegahannidesuka
     → 「そのcheckマークはどこまでが範囲ですか」になる
-      → 英字 gitcommit に戻る
+  ・J→E: 日本語モードにして gitcommit と入力（かなで表示される）、
+    続けて右⌘を素早く2回
+    → 英字 gitcommit に戻り、入力ソースが ABC に切り替わる
   ・権限ダイアログが出る場面があれば含める
 
   1〜2分で十分です。
 
-【録画後】
+【録画後】FHD に変換（Retina のままだと数百MBになり添付で詰まる）
+  ffmpeg -i 録画.mov -vf scale=1920:-2 -c:v libx264 -crf 23 \
+    -preset medium -pix_fmt yuv420p -an ithinkso-demo.mp4
+
+  ※ 1920:-2 は比率を保つ指定。1920x1080 に決め打ちすると
+     16:10 の MacBook 画面は縦が潰れる
+
   App Store Connect → 左サイドバー「App Review」
   →「App Reviewに返信」
   動画を添付し、docs/review-reply-2.1.md の
   英文（返信本文）を貼って送信してください。
+  返信文の項目2「macOS 26」は、この Mac の実際のバージョンに直すこと。
 ────────────────────────────────────────────
 
 NOTE
