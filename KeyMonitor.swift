@@ -84,6 +84,7 @@ class KeyMonitor {
     private var pendingEisu: CGEvent?
     private var eisuReplayGen = 0
     private let eisuReplayDelay = 0.5   // doubleTapWindow より長く
+    private let eisuFlushSettle = 0.12  // 英数を流してから文字を流すまでの待ち
     // ⌘単押しタップの状態（左⌘=E→J / 右⌘=J→E）
     private var lcmdDownTime: TimeInterval = 0
     private var rcmdDownTime: TimeInterval = 0
@@ -239,9 +240,13 @@ class KeyMonitor {
                buffer.count < maxBufferCount {
                 buffer.append((keyCode: keyCode, char: chars))
             }
+            // 英数の直後に文字を撃つと入力ソースの切替が間に合わず、
+            // 日本語モードのまま入ってしまう（あbc になる）。間を置く
             if let copy = event.copy() {
                 copy.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
-                copy.post(tap: .cgSessionEventTap)
+                DispatchQueue.main.asyncAfter(deadline: .now() + eisuFlushSettle) {
+                    copy.post(tap: .cgAnnotatedSessionEventTap)
+                }
             }
             return nil
         }
@@ -273,11 +278,15 @@ class KeyMonitor {
             }
             // 窓の外の連打: 前の保留分を先に再生してから新しく保留し直す
             flushPendingEisu()
-            // 1度目: バッファを退避し、素通しせず保留（合成を確定させない）
             eisuFirstTapTime = now
             eisuTapSnapshot = buffer
             eisuTapOverflowed = bufferOverflowed
+            let hadInput = !buffer.isEmpty
             resetBuffer()
+            // 直前に何も打っていなければ救済の対象が無い。保留せず素通しして
+            // 普通のモード切替として即座に効かせる（0.5秒待たせない）
+            guard hadInput else { return Unmanaged.passRetained(event) }
+            // 1度目: 素通しせず保留（未確定合成を確定させないため）
             holdEisu(event)
             return nil
         }
