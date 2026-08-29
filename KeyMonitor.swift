@@ -13,8 +13,10 @@ class KeyMonitor {
     /// 何文字以上で救出対象にするか。1 = 「a」→「あ」も救う
     private let rescueThreshold = 1
     /// これを超えたら救済しない。中途半端に一部だけ打ち直すと事故になるため
-    private let maxBufferCount = 100
+    private let maxBufferCount = 3000
     /// BS 連打の間隔。0 だと取りこぼすアプリがある
+    // 削除は英数モードで行うので IME に飲まれない。12ms でも取りこぼさない
+    // （実測: 日本語IMEのまま撃つと 30ms でも不定に3〜5個消えた）
     private let backspaceInterval = 0.012
     /// Kotoeri に流し込む間隔。IME の変換処理を待つ必要がある
     private let injectInterval = 0.030
@@ -74,6 +76,14 @@ class KeyMonitor {
     private var eisuFirstTapTime: TimeInterval = 0
     private var eisuTapSnapshot: [(keyCode: CGKeyCode, char: String)] = []
     private var eisuTapOverflowed = false
+
+    // 英数キーの保留再生。
+    // 新トリガー体系では 英数×2 = J→E。1度目を素通しすると未確定合成が
+    // 確定してしまい F10 が効かなくなるため、1度目は飲み込んで保留し、
+    // 2度目が来なければ後から注入し直す（単発押しの意図を壊さない）。
+    private var pendingEisu: CGEvent?
+    private var eisuReplayGen = 0
+    private let eisuReplayDelay = 0.5   // doubleTapWindow より長く
     // ⌘単押しタップの状態（左⌘=E→J / 右⌘=J→E）
     private var lcmdDownTime: TimeInterval = 0
     private var rcmdDownTime: TimeInterval = 0
@@ -171,7 +181,8 @@ class KeyMonitor {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
         // ── ⌘の2度タップ（US 配列でも押せる主トリガー） ──
-        //   左⌘×2 → E→J / 右⌘×2 → J→E
+        //   右⌘×2 → E→J（日本語にしたい） / 左⌘×2 → J→E（英語にしたい）
+        // JIS の物理配置（左=英数、右=かな）と意味を揃えてある。
         // MacBook では Karabiner で 左⌘タップ=英数 / 右⌘タップ=かな にして
         // いても、raw の⌘イベント自体は届くのでそのまま動く。
         // Karabiner が付加した英数/かなイベントで下の英数/かなトリガーも
@@ -195,10 +206,10 @@ class KeyMonitor {
                         if now - last < doubleTapWindow {
                             if isLeft {
                                 lcmdLastTapTime = 0
-                                fireEtoJ(reason: keyCode == leftOptionKeyCode ? "左⌥×2" : "左⌘×2")
+                                fireJtoE(reason: keyCode == leftOptionKeyCode ? "左⌥×2" : "左⌘×2")
                             } else {
                                 rcmdLastTapTime = 0
-                                fireJtoE(reason: "右⌘×2")
+                                fireEtoJ(reason: "右⌘×2")
                             }
                         } else {
                             if isLeft { lcmdLastTapTime = now } else { rcmdLastTapTime = now }
@@ -214,53 +225,75 @@ class KeyMonitor {
         // ⌘を押している最中のキー押下 = ⌘C などの修飾キー使用。タップ扱いにしない
         if lcmdDownTime > 0 || rcmdDownTime > 0 { cmdUsedAsModifier = true }
 
+        // 英数を保留したまま普通のキーが来た → 英数を先に注入してから
+        // このキーを注入し直す（順序を保つ）。修飾キー付きは触らず、
+        // 保留分はタイマーに任せる
+        if pendingEisu != nil, keyCode != eisuKeyCode,
+           !event.flags.contains(.maskCommand),
+           !event.flags.contains(.maskControl),
+           !event.flags.contains(.maskAlternate) {
+            flushPendingEisu()
+            // 打たれた文字はバッファにも反映しておく（注入コピーは
+            // synthetic タグ付きでこのタップを素通りするため）
+            if let chars = unicodeChar(from: event), isBufferable(chars),
+               buffer.count < maxBufferCount {
+                buffer.append((keyCode: keyCode, char: chars))
+            }
+            if let copy = event.copy() {
+                copy.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
+                copy.post(tap: .cgSessionEventTap)
+            }
+            return nil
+        }
+
         // ── トリガー体系 ──────────────────────────────────
         //
         // 方向はジェスチャで明示する。入力ソースの自動判定はしない
         // （バックグラウンドから前面アプリの入力ソースを知る手段が無く、
         //   実測で毎回誤判定したため）。
         //
-        //   英数×2 → E→J: 英語モードで打ってしまったローマ字を日本語に
-        //   かな×2 → J→E: 日本語モードで打ってしまった英語を元に戻す(F10)
-        //
-        // この割り当ては1度目の素通しがちょうど無害になる:
-        //   ・E→J を使う場面は英語モード → 英数の1度目は何も起こさない
-        //   ・J→E を使う場面は日本語モード → かなの1度目は何も起こさず、
-        //     未確定合成も開いたまま保たれる（F10 がそのまま効く）
+        //   かな×2 → E→J: 「日本語にしたい」。1度目のかな素通しは
+        //     日本語への切替になるだけで救済処理と衝突しない
+        //   英数×2 → J→E: 「英語にしたい」。ただし1度目の英数を素通しすると
+        //     未確定合成がその場で確定し F10 が死ぬため、1度目は保留する
+        //     （2度目が来なければ後から注入して単発押しとして成立させる）
         //
         // MacBook では Karabiner で 左⌘タップ=英数 / 右⌘タップ=かな に
         // している想定。⌘の2度タップがそのままトリガーになる。
 
-        // 英数×2 → E→J（Karabiner なしの JIS 向け。方向の対応は⌘と同じ）
+        // 英数×2 → J→E（英語にしたい）
         if keyCode == eisuKeyCode {
             let now = ProcessInfo.processInfo.systemUptime
             if now - eisuFirstTapTime < doubleTapWindow {
                 eisuFirstTapTime = 0
                 let snapshot = eisuTapSnapshot
                 eisuTapSnapshot = []
-                fireEtoJ(reason: "英数×2", snapshot: snapshot, overflowed: eisuTapOverflowed)
+                fireJtoE(reason: "英数×2", snapshot: snapshot)
                 return nil
             }
-            // 1度目: バッファを退避して素通し（英語モードでは何も起きない）
+            // 窓の外の連打: 前の保留分を先に再生してから新しく保留し直す
+            flushPendingEisu()
+            // 1度目: バッファを退避し、素通しせず保留（合成を確定させない）
             eisuFirstTapTime = now
             eisuTapSnapshot = buffer
             eisuTapOverflowed = bufferOverflowed
             resetBuffer()
-            return Unmanaged.passRetained(event)
+            holdEisu(event)
+            return nil
         }
 
-        // かな×2 → J→E
+        // かな×2 → E→J（日本語にしたい）
         if keyCode == kanaKeyCode {
             let now = ProcessInfo.processInfo.systemUptime
             if now - kanaFirstTapTime < doubleTapWindow {
                 kanaFirstTapTime = 0
                 let snapshot = kanaTapSnapshot
                 kanaTapSnapshot = []
-                fireJtoE(reason: "かな×2", snapshot: snapshot)
+                fireEtoJ(reason: "かな×2", snapshot: snapshot, overflowed: kanaTapOverflowed)
                 return nil
             }
-            // 1度目: バッファを退避して素通し（日本語モードでは何も起きず、
-            // 未確定合成もそのまま残る）
+            // 1度目: バッファを退避して素通し。日本語モードへの切替に
+            // なるだけで、後続の救済（削除→打ち直し）とは衝突しない
             kanaFirstTapTime = now
             kanaTapSnapshot = buffer
             kanaTapOverflowed = bufferOverflowed
@@ -316,6 +349,40 @@ class KeyMonitor {
         bufferOverflowed = false
     }
 
+    // MARK: - 英数キーの保留再生
+
+    private func holdEisu(_ event: CGEvent) {
+        pendingEisu = event.copy()
+        eisuReplayGen += 1
+        let gen = eisuReplayGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + eisuReplayDelay) { [weak self] in
+            guard let self, self.eisuReplayGen == gen else { return }
+            self.flushPendingEisu()
+        }
+    }
+
+    /// 保留中の英数を今すぐ注入する（単発押しの成立）
+    private func flushPendingEisu() {
+        guard let down = pendingEisu else { return }
+        pendingEisu = nil
+        eisuReplayGen += 1
+        down.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
+        down.post(tap: .cgSessionEventTap)
+        if let src = CGEventSource(stateID: .hidSystemState),
+           let up = CGEvent(keyboardEventSource: src, virtualKey: eisuKeyCode, keyDown: false) {
+            up.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
+            up.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    /// 保留中の英数を捨てる（2度押しが成立して救済が始まったとき）。
+    /// 破棄しないと、救済の最中や直後に synthetic タグ付きの英数が
+    /// タイマーから注入され、モードを壊す
+    private func discardPendingEisu() {
+        pendingEisu = nil
+        eisuReplayGen += 1
+    }
+
     // MARK: - 救済
 
     private func beginRescue() {
@@ -367,15 +434,18 @@ class KeyMonitor {
     private func fireEtoJ(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil,
                           overflowed: Bool? = nil) {
+        discardPendingEisu()
         var saved = snapshot ?? buffer
         var over = overflowed ?? bufferOverflowed
         if snapshot == nil {
+            // ⌘タップにかなが載っている環境では、⌘1度目に付随するかなが
+            // 先にバッファを退避してしまう。その退避分から回収する
             let now = ProcessInfo.processInfo.systemUptime
-            if saved.isEmpty, !eisuTapSnapshot.isEmpty, now - eisuFirstTapTime < 1.0 {
-                saved = eisuTapSnapshot
-                over = eisuTapOverflowed
-                eisuTapSnapshot = []
-                eisuFirstTapTime = 0
+            if saved.isEmpty, !kanaTapSnapshot.isEmpty, now - kanaFirstTapTime < 1.0 {
+                saved = kanaTapSnapshot
+                over = kanaTapOverflowed
+                kanaTapSnapshot = []
+                kanaFirstTapTime = 0
             }
             resetBuffer()
         }
@@ -389,13 +459,16 @@ class KeyMonitor {
     /// ⌘タップにかなが載っている環境向けに、E→J と同じスナップショット救済を行う
     private func fireJtoE(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil) {
+        discardPendingEisu()
         var saved = snapshot ?? buffer
         if snapshot == nil {
+            // ⌘タップに英数が載っている環境では、⌘1度目に付随する英数が
+            // 先にバッファを退避してしまう。その退避分から回収する
             let now = ProcessInfo.processInfo.systemUptime
-            if saved.isEmpty, !kanaTapSnapshot.isEmpty, now - kanaFirstTapTime < 1.0 {
-                saved = kanaTapSnapshot
-                kanaTapSnapshot = []
-                kanaFirstTapTime = 0
+            if saved.isEmpty, !eisuTapSnapshot.isEmpty, now - eisuFirstTapTime < 1.0 {
+                saved = eisuTapSnapshot
+                eisuTapSnapshot = []
+                eisuFirstTapTime = 0
             }
             resetBuffer()
         }
@@ -467,10 +540,8 @@ class KeyMonitor {
     //   確定しないと、literal が未確定合成と衝突する上、
     //   ライブ変換の「解析不能なら全体を生 ASCII に戻す」挙動に巻き込まれる。
     // - 末尾の日本語区間は確定しない（ユーザーが変換を続けられるように）
-    /// skipSwitch: かな×2 トリガー経由では1度目の実かな押しが既に
-    /// 日本語へ切り替えているため、かなを再注入しない。
-    /// 短時間にかなが3連打されると Kotoeri 側の2度押し機能（再変換等）を
-    /// 誤発動させ、BS の削除数が狂う（実測: 先頭4文字が残った）。
+    /// skipSwitch: 呼び出し側で既に英数モードにしてある場合に true。
+    /// 削除は英数モードで行い、そのあと日本語へ切り替えて打ち直す。
     private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
                                   skipSwitch: Bool = false) {
         let segs = Self.segment(saved.map { $0.char })
@@ -480,19 +551,27 @@ class KeyMonitor {
         }.joined()
         itsLog.error("区間分割: \(desc, privacy: .public) skipSwitch=\(skipSwitch)")
 
-        let begin: (@escaping () -> Void) -> Void = { [weak self] then in
+        // 削除は必ず英数モードで行う。
+        // 日本語IMEが有効なまま BS を撃つと、ことえりが不定個数を飲む
+        // （実測: 12回撃って3〜5回届かない。間隔を12ms→30msにしても再現）。
+        // 英数モードなら BS は IME を通らず直接テキストに届く。
+        //   英数へ切替 → 全削除 → かなへ切替 → 打ち直し
+        // skipSwitch は「呼び出し側で既に英数にした」という意味で使う。
+        let toEisu: (@escaping () -> Void) -> Void = { [weak self] then in
             guard let self else { return }
             if skipSwitch {
-                // 切替済み。IME の受け入れ態勢だけ短く待つ
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: then)
             } else {
-                self.switchIME(toJapanese: true, then: then)
+                self.switchIME(toJapanese: false, then: then)
             }
         }
-        begin { [weak self] in
+        toEisu { [weak self] in
             guard let self = self else { return }
             self.postBackspaces(saved.count) {
-                self.injectSegments(saved, segs, 0)
+                // 消し終えてから日本語へ。ここで初めて IME が要る
+                self.switchIME(toJapanese: true) {
+                    self.injectSegments(saved, segs, 0)
+                }
             }
         }
     }
