@@ -5,9 +5,9 @@
 "I think so" is a menu bar utility for Japanese users who type with two
 input modes (Japanese IME and English). When the user types in the wrong
 mode (e.g., Japanese romaji while still in English mode), the text comes
-out garbled. The app lets the user double-tap the left Command key to have the
+out garbled. The app lets the user double-tap the right Command key to have the
 mistyped text deleted and retyped through the Japanese IME. A double-tap
-of the right Command key performs the reverse (restoring English typed
+of the left Command key performs the reverse (restoring English typed
 while the Japanese IME was active).
 
 This is the app's single, entire function. It has no network capability,
@@ -42,7 +42,9 @@ posts events on its own initiative.
 
 No special keyboard is required: the triggers are double-taps of the
 Command keys, which exist on every Mac keyboard layout.
-Left Command = retype as Japanese, right Command = restore as English.
+Right Command = retype as Japanese, left Command = restore as English.
+(This matches the JIS layout, where the kana key is on the right of the
+space bar and the eisu key on the left.)
 (The JIS eisu/kana keys also work, for users who have them.)
 
 Requirements: the "Japanese - Romaji" input source enabled in
@@ -52,13 +54,13 @@ System Settings > Keyboard > Text Input, in addition to ABC.
    Accessibility when prompted, then relaunch if needed).
 2. In TextEdit, with the ABC input source active, type:
    `sonocheckma-kuhadokomadegahannidesuka`
-3. Double-tap the left Command key (twice within 0.35 s).
+3. Double-tap the right Command key (twice within 0.35 s).
 4. The ASCII text is deleted and retyped through the Japanese IME,
    producing 「そのcheckマークはどこまでが範囲ですか」 (the English word
    "check" is preserved; the rest becomes Japanese).
 5. Reverse direction: with the Japanese input source active, type
    `gitcommit` (it appears as a kana composition), then double-tap the
-   right Command key. It is restored to the literal romaji "gitcommit"
+   left Command key. It is restored to the literal romaji "gitcommit"
    and the input source switches back to ABC.
 
 If using a mouse only, the menu bar item「直前の入力を日本語に打ち直す」
