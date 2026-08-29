@@ -1,0 +1,53 @@
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1200px; background:#F9F9F9; }
+  body { font-family:"Hiragino Sans","Noto Sans JP",-apple-system,sans-serif;
+         color:#1D1D1F; -webkit-font-smoothing:antialiased; padding:44px 40px; }
+  h2 { font-size:30px; font-weight:700; margin-bottom:8px; }
+  .sub { font-size:17px; color:#7C7C83; margin-bottom:30px; line-height:1.6; }
+  .row { display:flex; align-items:center; gap:26px; background:#fff;
+         border:1px solid #E3E3E8; border-radius:16px; padding:26px 30px; margin-bottom:14px; }
+  .keys { flex:none; width:290px; display:flex; align-items:center; gap:9px; }
+  .cap { border:2px solid #DF8D3B; border-radius:11px; color:#DF8D3B;
+         font-size:20px; font-weight:700; padding:11px 15px; line-height:1; background:#fff; }
+  .or { color:#9A9AA0; font-size:15px; }
+  .times { font-size:21px; font-weight:700; }
+  .desc { flex:1; }
+  .goal { font-size:22px; font-weight:700; margin-bottom:6px; }
+  .goal .accent { color:#DF8D3B; }
+  .detail { font-size:16px; color:#5C6880; line-height:1.65; }
+  .note { margin-top:26px; font-size:16px; color:#5C6880; line-height:1.8;
+          border-left:4px solid #DF8D3B; padding-left:16px; }
+  .note b { color:#1D1D1F; }
+</style>
+
+<h2>覚える操作は2つだけ</h2>
+<div class="sub">行きたいモードのキーを、素早く2回押すだけです。</div>
+
+<div class="row">
+  <div class="keys">
+    <span class="cap">かな</span><span class="times">×2</span>
+    <span class="or">または</span><span class="cap">右⌘</span><span class="times">×2</span>
+  </div>
+  <div class="desc">
+    <div class="goal"><span class="accent">日本語</span>にしたいとき</div>
+    <div class="detail">英語モードのまま打ってしまったローマ字を消して、日本語で打ち直します</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="keys">
+    <span class="cap">英数</span><span class="times">×2</span>
+    <span class="or">または</span><span class="cap">左⌘</span><span class="times">×2</span>
+  </div>
+  <div class="desc">
+    <div class="goal"><span class="accent">英語</span>にしたいとき</div>
+    <div class="detail">日本語モードで打ってしまった英語を、打った通りのローマ字に戻します</div>
+  </div>
+</div>
+
+<div class="note">
+  JIS配列では、スペースキーの<b>右が「かな」・左が「英数」</b>。<br>
+  押すキーと行き先が一致するので、迷いません。
+</div>
