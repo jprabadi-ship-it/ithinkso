@@ -8,6 +8,14 @@ source ~/.appstore_env
 
 VER=${1:?使い方: ./release-did.sh <バージョン> <ビルド番号>  例: ./release-did.sh 1.0.1 8}
 BUILD=${2:?ビルド番号がありません}
+
+# Developer ID 証明書の名義はキーチェーンから引く。名義を直書きすると
+# 証明書を作り直したときに追従できず、リポジトリにも氏名が残る。
+SIGN_ID="${ITHINKSO_SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
+  | awk -F'"' '/Developer ID Application/ {print $2; exit}')}"
+[[ -z "$SIGN_ID" ]] && { echo "❌ Developer ID Application 証明書が見つかりません"; exit 1; }
+TEAM_ID="${SIGN_ID##*\(}"; TEAM_ID="${TEAM_ID%\)}"
+echo "▶ 署名ID: $SIGN_ID"
 SRC="${0:a:h}"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
@@ -24,8 +32,8 @@ xcodebuild -project IThinkSo.xcodeproj -scheme IThinkSo -configuration Release \
   CODE_SIGN_ENTITLEMENTS="IThinkSo/IThinkSo-DID.entitlements" \
   CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   CODE_SIGN_STYLE=Manual \
-  CODE_SIGN_IDENTITY="Developer ID Application: gigowat (3HCG7Y94FX)" \
-  DEVELOPMENT_TEAM=3HCG7Y94FX \
+  CODE_SIGN_IDENTITY="$SIGN_ID" \
+  DEVELOPMENT_TEAM="$TEAM_ID" \
   OTHER_CODE_SIGN_FLAGS="--timestamp" \
   MARKETING_VERSION="$VER" CURRENT_PROJECT_VERSION="$BUILD" \
   clean build | tail -2
@@ -43,7 +51,7 @@ STAGE="$W/stage"; mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 DMG="$HOME/Desktop/IThinkSo-$VER.dmg"; rm -f "$DMG"
 hdiutil create -volname "I think so" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-codesign --force --sign "Developer ID Application: gigowat (3HCG7Y94FX)" --timestamp "$DMG"
+codesign --force --sign "$SIGN_ID" --timestamp "$DMG"
 xcrun notarytool submit "$DMG" \
   --key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
 xcrun stapler staple "$DMG"

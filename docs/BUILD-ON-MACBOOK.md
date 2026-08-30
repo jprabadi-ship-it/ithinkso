@@ -7,7 +7,7 @@
 
 - 外部依存パッケージは無い（AppKit / SwiftUI / StoreKit 不使用の素の構成）
 - 必要環境: macOS 13 以降をターゲットにビルドできる Xcode
-- Team ID: `3HCG7Y94FX`（gigowat）
+- Team ID: `3HCG7Y94FX`
 - Bundle ID: `com.rabadi.ithinkso`
 
 ## 1. プロジェクトをローカルにコピーする（重要）
@@ -31,7 +31,7 @@ xattr -cr .
 ## 2. Xcode に Developer アカウントをサインイン
 
 Xcode → Settings → Accounts → `+` → Apple ID。
-`gigowat (3HCG7Y94FX)` が表示されることを確認する。
+Team ID `3HCG7Y94FX` のチームが表示されることを確認する。
 
 証明書（Apple Distribution / Mac Installer Distribution）と
 プロビジョニングプロファイルは、次の手順の
