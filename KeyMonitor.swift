@@ -67,6 +67,8 @@ class KeyMonitor {
     private var watchdog: DispatchWorkItem?
     /// 自タップが「自分の注入イベント」として認識した数。タグが機能しているかの確認用
     private var syntheticSeen = 0
+    /// 救済の世代。中断すると進み、予約済みの継続を無効化する
+    private var rescueGen = 0
 
     // かな2度押しの状態（J→E）
     private var kanaFirstTapTime: TimeInterval = 0
@@ -107,9 +109,15 @@ class KeyMonitor {
     func start() {
         guard eventTap == nil else { return }
 
+        // マウス押下も見る。クリックでキャレットが動くと、打鍵バッファと
+        // 画面上の文字列の対応が切れる。それに気づかず救済すると、打っていない
+        // 場所の文字を消してしまう
         let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
                                    | (1 << CGEventType.keyUp.rawValue)
                                    | (1 << CGEventType.flagsChanged.rawValue)
+                                   | (1 << CGEventType.leftMouseDown.rawValue)
+                                   | (1 << CGEventType.rightMouseDown.rawValue)
+                                   | (1 << CGEventType.otherMouseDown.rawValue)
 
         let selfPtr = Unmanaged.passRetained(self).toOpaque()
         // options: .defaultTap は抑止・改変が可能なモード。
@@ -135,6 +143,7 @@ class KeyMonitor {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        observeAppSwitch()
         itsLog.error("event tap 作成・有効化 OK")
     }
 
@@ -172,6 +181,17 @@ class KeyMonitor {
         // 自分が注入した合成イベントはタグで識別してそのまま通す
         if event.getIntegerValueField(.eventSourceUserData) == syntheticUserData {
             syntheticSeen += 1
+            return Unmanaged.passRetained(event)
+        }
+
+        // マウス押下: キャレットが移動しうるのでバッファを無効化する。
+        // 救済中ならそこで中断する。注入先が変わった状態で撃ち続けるほうが危険
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            if isRescuing {
+                itsLog.error("救済中にクリック → 中断")
+                abortRescue()
+            }
+            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
@@ -396,6 +416,7 @@ class KeyMonitor {
 
     private func beginRescue() {
         isRescuing = true
+        rescueGen += 1
         syntheticSeen = 0
         watchdog?.cancel()
         // 非同期チェーンが途中で切れると isRescuing が true のまま固まり、
@@ -407,6 +428,33 @@ class KeyMonitor {
         }
         watchdog = work
         DispatchQueue.main.asyncAfter(deadline: .now() + rescueTimeout, execute: work)
+    }
+
+    /// 進行中の救済を打ち切る。世代を進めるので、予約済みの継続は
+    /// aliveRescue() で弾かれ、以後は何も注入しない
+    private func abortRescue() {
+        rescueGen += 1
+        endRescue()
+    }
+
+    /// 前面アプリの切り替えを監視してバッファを捨てる。
+    /// 別アプリに移ってから救済すると、移動先の文字を消してしまう
+    private func observeAppSwitch() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                if self.isRescuing {
+                    itsLog.error("救済中にアプリ切替 → 中断")
+                    self.abortRescue()
+                }
+                self.resetBuffer()
+        }
+    }
+
+    /// この世代の救済がまだ生きているか。非同期の継続点で必ず確認する
+    private func aliveRescue(_ gen: Int) -> Bool {
+        return isRescuing && rescueGen == gen
     }
 
     private func endRescue() {
@@ -599,8 +647,9 @@ class KeyMonitor {
             return (keyCode: kc, char: String(ch))
         }
         let interval = seg.isEnglish ? injectIntervalASCII : injectInterval
+        let gen = rescueGen
         injectKeys(keys, index: 0, interval: interval, asLiteral: seg.isEnglish) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.aliveRescue(gen) else { return }
             let isLast = idx == segs.count - 1
             if !seg.isEnglish && !isLast {
                 // 次は英語区間（統合済みなので日本語が連続することはない）
@@ -699,9 +748,12 @@ class KeyMonitor {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: done)
             return
         }
+        let gen = rescueGen
         postSyntheticKey(backspaceKeyCode)
         DispatchQueue.main.asyncAfter(deadline: .now() + backspaceInterval) { [weak self] in
-            self?.postBackspaces(count - 1, done: done)
+            // 中断されていたら残りの BS は撃たない。撃つと移動先の文字が消える
+            guard let self, self.aliveRescue(gen) else { return }
+            self.postBackspaces(count - 1, done: done)
         }
     }
 
@@ -748,8 +800,10 @@ class KeyMonitor {
         down?.post(tap: .cgSessionEventTap)
         up?.post(tap: .cgSessionEventTap)
 
+        let gen = rescueGen
         DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
-            self?.injectKeys(keys, index: index + 1, interval: interval, asLiteral: asLiteral, done: done)
+            guard let self, self.aliveRescue(gen) else { return }
+            self.injectKeys(keys, index: index + 1, interval: interval, asLiteral: asLiteral, done: done)
         }
     }
 
@@ -778,7 +832,11 @@ class KeyMonitor {
         itsLog.error("IME切替: \(toJapanese ? "かな" : "英数", privacy: .public)キー(\(keyCode))を注入")
         // かなキー投函から前面アプリの IME が実際に切り替わるまで:
         // 0.15s では不達、0.3s で安定（実測）。マージンを取って imeSettleDelay
-        DispatchQueue.main.asyncAfter(deadline: .now() + imeSettleDelay, execute: then)
+        let gen = rescueGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + imeSettleDelay) { [weak self] in
+            guard let self, self.aliveRescue(gen) else { return }
+            then()
+        }
     }
 
     private func currentSourceID() -> String {
