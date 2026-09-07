@@ -39,9 +39,54 @@ class AppState: ObservableObject {
     let keyMonitor = KeyMonitor()
     private var permissionTimer: Timer?
 
+    #if ITS_SELECTION
+    /// 選択範囲の打ち直しに使うアクセシビリティ権限（kTCCServiceAccessibility）が
+    /// あるか。hasInputPermission（ListenEvent + PostEvent）とは別の権限で、
+    /// システム設定では同じペインに畳まれて表示される
+    @Published var hasAXPermission: Bool = false
+
+    /// 選択範囲の打ち直し。既定オフのオプトイン。
+    /// 「既定では他アプリの画面内容を読まない」という公開済みの約束を守るため、
+    /// 利用者が自分で有効にした場合に限って読み取りが起きる
+    @Published var selectionRescueEnabled: Bool = UserDefaults.standard.bool(forKey: "ITSSelectionRescue") {
+        didSet {
+            UserDefaults.standard.set(selectionRescueEnabled, forKey: "ITSSelectionRescue")
+            keyMonitor.selectionRescueEnabled = selectionRescueEnabled
+            if selectionRescueEnabled { requestAXPermission() }
+        }
+    }
+    private var axTimer: Timer?
+
+    func refreshAXStatus() {
+        hasAXPermission = SelectionReader.isTrusted
+    }
+
+    /// 未許可なら OS のダイアログを出し、付与されるまで1秒ごとに見る
+    func requestAXPermission() {
+        refreshAXStatus()
+        guard !hasAXPermission else { return }
+        SelectionReader.requestTrust()
+        axTimer?.invalidate()
+        axTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor [weak self] in
+                guard let self else { timer.invalidate(); return }
+                self.refreshAXStatus()
+                if self.hasAXPermission {
+                    timer.invalidate()
+                    self.axTimer = nil
+                }
+            }
+        }
+    }
+    #endif
+
     init() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refreshPermissionStatus()
+        #if ITS_SELECTION
+        keyMonitor.selectionRescueEnabled = selectionRescueEnabled
+        refreshAXStatus()
+        #endif
 
         if canRun {
             keyMonitor.start()
@@ -69,6 +114,9 @@ class AppState: ObservableObject {
     func refreshPermissionStatus() {
         let wasGranted = hasInputPermission
         hasInputPermission = CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
+        #if ITS_SELECTION
+        refreshAXStatus()
+        #endif
         if hasInputPermission && !wasGranted && canRun {
             keyMonitor.start()
         }

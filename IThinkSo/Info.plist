@@ -25,7 +25,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
-	<string>打ち間違えたテキストを削除・打ち直すためにキー入力イベントを送出します（システム設定では「アクセシビリティ」に表示されますが、使用するのはイベント送出機能のみです）。</string>
+	<string>打ち間違えたテキストを削除・打ち直すためにキー入力イベントを送出します。「選択したテキストも打ち直す」を有効にした場合に限り、その操作の瞬間だけ選択中の文字列を読み取ります（メモリ上でのみ扱い、保存や送信はしません）。</string>
 	<key>NSInputMonitoringUsageDescription</key>
 	<string>かなキーの2度押しを検出し、入力モードを間違えて打ったローマ字を記憶するためにキーボード入力を監視します。入力内容はメモリ上でのみ扱い、保存や外部送信は一切行いません。</string>
 	<key>NSHumanReadableCopyright</key>

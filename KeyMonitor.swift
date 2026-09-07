@@ -1,6 +1,9 @@
 import Cocoa
 import Carbon
 import os
+#if ITS_SELECTION
+import ApplicationServices
+#endif
 
 /// GUI アプリの print は unified log に乗らないため、追跡は os_log で行う。
 /// 読むとき: /usr/bin/log show --predicate 'subsystem == "com.rabadi.ithinkso"' --last 2m
@@ -70,6 +73,10 @@ class KeyMonitor {
     private var syntheticSeen = 0
     /// 救済の世代。中断すると進み、予約済みの継続を無効化する
     private var rescueGen = 0
+    #if ITS_SELECTION
+    /// 選択範囲の打ち直しを使うか。メニューでオプトインする（既定 false）
+    var selectionRescueEnabled = false
+    #endif
 
     // かな2度押しの状態（J→E）
     private var kanaFirstTapTime: TimeInterval = 0
@@ -540,6 +547,10 @@ class KeyMonitor {
         itsLog.error("\(reason, privacy: .public) 検出 (buffer=\(saved.count)文字) → E→J")
         if let ok = validateRescuable(saved, overflowed: over) {
             triggerRescueToJapanese(ok, skipSwitch: false)
+        } else if saved.isEmpty {
+            // 打鍵の記憶が無い（時間が経った／クリックした／アプリを移った）
+            // ときだけ、選択範囲を対象にする。バッファ優先・選択はフォールバック
+            trySelectionRescue(reason: reason)
         }
     }
 
@@ -580,15 +591,94 @@ class KeyMonitor {
             guard let self else { return }
             if let saved = self.validateRescuable(snapshot, overflowed: overflowed) {
                 self.triggerRescueToJapanese(saved, skipSwitch: false)
+            } else if snapshot.isEmpty {
+                self.trySelectionRescue(reason: "メニュー")
             }
         }
     }
 
+    // MARK: - 選択範囲の打ち直し（オプトイン・Developer ID 版のみ）
+    //
+    // 打鍵バッファが空のときに限り、前面アプリで選択中の文字列を対象にする。
+    // 読むのはアクセシビリティ API、書くのは既存の打鍵注入。AX で直接置換すると
+    // IME を通らず変換されないので、AX は読み取りにしか使わない。
+    private func trySelectionRescue(reason: String) {
+        #if ITS_SELECTION
+        guard selectionRescueEnabled else { return }
+        guard SelectionReader.isTrusted else {
+            itsLog.error("選択救済: アクセシビリティ未許可のため実行しない")
+            return
+        }
+        guard !isRescuing else { return }
+        let targetPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // AX の往復中にクリックやアプリ切替が起きても aliveRescue で弾けるよう、
+        // 読む前に救済を立てておく。棄却する経路では必ず endRescue すること
+        beginRescue(budget: 3.0)
+        let gen = rescueGen
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let hit = SelectionReader.read()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.aliveRescue(gen) else { return }
+                guard let hit else {
+                    self.endRescue()
+                    itsLog.error("\(reason, privacy: .public): 選択なし → 救済対象なし")
+                    return
+                }
+                guard hit.pid == targetPid,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPid else {
+                    self.endRescue()
+                    itsLog.error("選択救済: 前面アプリが変わったため中止")
+                    return
+                }
+                guard let accepted = Self.selectionKeys(hit.text) else {
+                    self.endRescue()
+                    itsLog.error("選択救済: 受理せず (\(hit.text.count)文字)")
+                    return
+                }
+                itsLog.error("\(reason, privacy: .public) 検出 (選択=\(accepted.keys.count)文字) → E→J")
+                // 選択があれば BS 1回で全部消える（実測）。文字数ぶん撃たない
+                self.triggerRescueToJapanese(accepted.keys, skipSwitch: false,
+                                             deleteCount: 1, segments: accepted.segments)
+            }
+        }
+        #endif
+    }
+
+    static let maxSelectionCount = 3000
+
+    /// 選択テキストを受理するか。
+    /// 打鍵バッファ用の segment() は1編集修復と曖昧辞書で綴りを書き換える
+    /// （market→make、monitor→monito など。実測で英単語49語中22語が化けた）。
+    /// 打ちたてのローマ字が相手なら正しい振る舞いだが、選択テキストは英単語
+    /// そのものかもしれない。一切の書き換えが起きなかった場合だけ通す
+    static func selectionKeys(_ text: String)
+        -> (keys: [(keyCode: CGKeyCode, char: String)], segments: [Segment])? {
+        let cs = Array(text)
+        guard cs.count >= 2, cs.count <= maxSelectionCount else { return nil }
+        // 小文字と長音の '-' だけ。大文字・数字・記号・空白・日本語は対象外
+        guard cs.allSatisfy({ ($0 >= "a" && $0 <= "z") || $0 == "-" }) else { return nil }
+        let segs = segment(cs.map { String($0) })
+        guard segs.allSatisfy({ !$0.corrected }) else { return nil }          // 修復が走った
+        guard segs.map({ $0.text }).joined() == text else { return nil }       // 文字が増減した
+        for seg in segs where seg.isEnglish {
+            guard englishWords.contains(seg.text) else { return nil }          // 未知クラスタ扱いされた
+        }
+        let keys = cs.compactMap { c -> (keyCode: CGKeyCode, char: String)? in
+            guard let kc = asciiKeyMap[c] else { return nil }
+            return (keyCode: kc, char: String(c))
+        }
+        guard keys.count == cs.count else { return nil }
+        return (keys, segs)
+    }
+
     private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
-                                         skipSwitch: Bool = false) {
+                                         skipSwitch: Bool = false,
+                                         deleteCount: Int? = nil,
+                                         segments: [Segment]? = nil) {
         beginRescue(budget: rescueBudget(forCharacters: saved.count))
         itsLog.error("救済開始 E→J \(saved.count)文字")
-        rescueToJapanese(saved, skipSwitch: skipSwitch)
+        rescueToJapanese(saved, skipSwitch: skipSwitch, deleteCount: deleteCount, segments: segments)
     }
 
     // ── 日本語 → 英語（F10 方式） ──────────────────────────────────
@@ -629,9 +719,13 @@ class KeyMonitor {
     // - 末尾の日本語区間は確定しない（ユーザーが変換を続けられるように）
     /// skipSwitch: 呼び出し側で既に英数モードにしてある場合に true。
     /// 削除は英数モードで行い、そのあと日本語へ切り替えて打ち直す。
+    /// deleteCount: 削除する回数。省略時は文字数ぶん。選択範囲が相手なら 1 で足りる
+    /// segments:    区間分割の結果を呼び出し側が持っているときに渡す（再計算しない）
     private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
-                                  skipSwitch: Bool = false) {
-        let segs = Self.segment(saved.map { $0.char })
+                                  skipSwitch: Bool = false,
+                                  deleteCount: Int? = nil,
+                                  segments: [Segment]? = nil) {
+        let segs = segments ?? Self.segment(saved.map { $0.char })
         // 区間の中身はユーザーの文章そのものなのでログに残さない。
         // 構成（日本語/英語の並びと文字数）だけを出す
         let shape = segs.map { ($0.isEnglish ? "EN" : "JA") + "\($0.text.count)" }.joined(separator: "+")
@@ -653,7 +747,7 @@ class KeyMonitor {
         }
         toEisu { [weak self] in
             guard let self = self else { return }
-            self.postBackspaces(saved.count) {
+            self.postBackspaces(deleteCount ?? saved.count) {
                 // 消し終えてから日本語へ。ここで初めて IME が要る
                 self.switchIME(toJapanese: true) {
                     self.injectSegments(saved, segs, 0)
@@ -1264,3 +1358,57 @@ class KeyMonitor {
         return hasVowel && allValid
     }
 }
+
+#if ITS_SELECTION
+/// 前面アプリで選択中の文字列をアクセシビリティ API で読む。読むだけで、書かない。
+enum SelectionReader {
+    struct Hit {
+        let text: String
+        let pid: pid_t
+    }
+
+    /// kTCCServiceAccessibility が許可されているか。プロンプトは出さない
+    static var isTrusted: Bool { AXIsProcessTrusted() }
+
+    /// 未許可なら OS 標準のダイアログを出す。「システム設定を開く」ボタンが
+    /// 正しいペインへ直接飛ぶので、項目名の改称（macOS 26 で「アクセシビリティ」
+    /// →「デバイスの制御とデータへのアクセス」）に左右されない
+    static func requestTrust() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    /// 必ずバックグラウンドから呼ぶこと。
+    /// イベントタップはメインランループで動いているので、メインで AX の同期 IPC を
+    /// すると応答しない相手で既定6秒止まり、.tapDisabledByTimeout でタップごと止まる
+    static func read(timeout: Float = 0.25) -> Hit? {
+        guard AXIsProcessTrusted() else { return nil }
+        let sys = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(sys, timeout)
+
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() else { return nil }
+        let el = f as! AXUIElement
+        AXUIElementSetMessagingTimeout(el, timeout)
+
+        // 編集できる場所だけを相手にする。Safari の本文や Mail の受信文、
+        // ターミナルのスクロールバックは選択を読めても書けない。ここで確実に落とす
+        var settable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable) == .success,
+              settable.boolValue else { return nil }
+
+        var role: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) == .success,
+              let r = role as? String, r == kAXTextAreaRole || r == kAXTextFieldRole else { return nil }
+
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &value) == .success,
+              let text = value as? String, !text.isEmpty else { return nil }
+
+        var pid: pid_t = 0
+        AXUIElementGetPid(el, &pid)
+        return Hit(text: text, pid: pid)
+    }
+}
+#endif

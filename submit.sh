@@ -45,6 +45,14 @@ archive)
   done
   echo "✅ 開発用コードの混入なし"
 
+  # 選択範囲の読み取り（AX API）は Developer ID 版限定。App Store 版に載ると
+  # 2.4.5 の指摘に直結する。文字列 grep では捕まらないのでシンボルで検査する
+  if nm -u "$BIN" | grep -qE "_AXUIElement|_AXIsProcessTrusted"; then
+    echo "❌ 出荷ビルドに AX シンボルが含まれています。中止します。"
+    exit 1
+  fi
+  echo "✅ AX シンボルの混入なし"
+
   # Xcode Organizer にも表示されるようコピー
   ARCHDIR=~/Library/Developer/Xcode/Archives/$(date +%Y-%m-%d)
   mkdir -p "$ARCHDIR"
