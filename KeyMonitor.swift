@@ -23,6 +23,7 @@ class KeyMonitor {
     /// IME を通さない注入の間隔。変換待ちが不要なので詰められる
     private let injectIntervalASCII = 0.005
     /// 救済が固まったときに強制解除するまでの時間
+    /// 救済の見張り時間の下限。実際は文字数ぶん延ばす（rescueBudget 参照）
     private let rescueTimeout = 6.0
     /// かな/英数キー注入から前面アプリの IME が切り替わるまでの待ち時間。
     /// 実測: 0.15s では不達、0.3s で安定。マージン込みで 0.4s
@@ -187,11 +188,15 @@ class KeyMonitor {
         // マウス押下: キャレットが移動しうるのでバッファを無効化する。
         // 救済中ならそこで中断する。注入先が変わった状態で撃ち続けるほうが危険
         if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
-            if isRescuing {
-                itsLog.error("救済中にクリック → 中断")
-                abortRescue()
+            // メニューバーのクリックはキャレットを動かさない。ここで捨てると
+            // メニューの「直前の入力を打ち直す」が常に空振りする
+            if !isClickInMenuBar(event) {
+                if isRescuing {
+                    itsLog.error("救済中にクリック → 中断")
+                    abortRescue()
+                }
+                resetBuffer()
             }
-            resetBuffer()
             return Unmanaged.passRetained(event)
         }
 
@@ -414,7 +419,17 @@ class KeyMonitor {
 
     // MARK: - 救済
 
-    private func beginRescue() {
+    /// 注入にかかる時間の見積り。固定6秒だと120文字あたりで注入の途中に
+    /// watchdog が落ち、isRescuing が下りて残りが実キー扱いになり文字列が壊れる。
+    /// 切替2回 + 削除 + 注入 に余裕を足して見積もる
+    private func rescueBudget(forCharacters n: Int) -> TimeInterval {
+        let switching = imeSettleDelay * 2 + 0.5
+        let deleting  = Double(n) * backspaceInterval
+        let injecting = Double(n) * max(injectInterval, injectIntervalASCII)
+        return max(rescueTimeout, switching + deleting + injecting + 2.0)
+    }
+
+    private func beginRescue(budget: TimeInterval? = nil) {
         isRescuing = true
         rescueGen += 1
         syntheticSeen = 0
@@ -427,7 +442,7 @@ class KeyMonitor {
             self.endRescue()
         }
         watchdog = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + rescueTimeout, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (budget ?? rescueTimeout), execute: work)
     }
 
     /// 進行中の救済を打ち切る。世代を進めるので、予約済みの継続は
@@ -437,13 +452,29 @@ class KeyMonitor {
         endRescue()
     }
 
+    /// クリック位置がメニューバーの帯の中か。画面座標は左上原点で来る
+    private func isClickInMenuBar(_ event: CGEvent) -> Bool {
+        let p = event.location
+        guard let screen = NSScreen.screens.first(where: { s in
+            let f = s.frame
+            let flippedY = (NSScreen.screens.first?.frame.maxY ?? f.maxY) - p.y
+            return f.minX <= p.x && p.x <= f.maxX && f.minY <= flippedY && flippedY <= f.maxY
+        }) ?? NSScreen.main else { return false }
+        let barHeight = screen.frame.maxY - screen.visibleFrame.maxY
+        return p.y <= max(barHeight, 24)
+    }
+
     /// 前面アプリの切り替えを監視してバッファを捨てる。
     /// 別アプリに移ってから救済すると、移動先の文字を消してしまう
     private func observeAppSwitch() {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main) { [weak self] _ in
+            object: nil, queue: .main) { [weak self] note in
                 guard let self else { return }
+                // 自分がアクティブになっただけ（メニューを開いた）なら、
+                // キャレットは元の場所のままなのでバッファを保つ
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                if app?.processIdentifier == getpid() { return }
                 if self.isRescuing {
                     itsLog.error("救済中にアプリ切替 → 中断")
                     self.abortRescue()
@@ -476,7 +507,7 @@ class KeyMonitor {
         guard saved.count >= rescueThreshold else { return nil }
         let text = saved.map { $0.char }.joined()
         guard looksLikeRomaji(text) else {
-            itsLog.error("ローマ字と判定されず救済しない: \(text, privacy: .public)")
+            itsLog.error("ローマ字と判定されず救済しない (\(text.count)文字)")
             return nil
         }
         return saved
@@ -555,9 +586,8 @@ class KeyMonitor {
 
     private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
                                          skipSwitch: Bool = false) {
-        beginRescue()
-        let romaji = saved.map { $0.char }.joined()
-        itsLog.error("救済開始 E→J '\(romaji, privacy: .public)' \(saved.count)文字")
+        beginRescue(budget: rescueBudget(forCharacters: saved.count))
+        itsLog.error("救済開始 E→J \(saved.count)文字")
         rescueToJapanese(saved, skipSwitch: skipSwitch)
     }
 
@@ -602,11 +632,10 @@ class KeyMonitor {
     private func rescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
                                   skipSwitch: Bool = false) {
         let segs = Self.segment(saved.map { $0.char })
-        let desc = segs.map { seg -> String in
-            let mark = seg.corrected ? "✱" : ""
-            return seg.isEnglish ? "[EN:\(seg.text)\(mark)]" : "[JA:\(seg.text)\(mark)]"
-        }.joined()
-        itsLog.error("区間分割: \(desc, privacy: .public) skipSwitch=\(skipSwitch)")
+        // 区間の中身はユーザーの文章そのものなのでログに残さない。
+        // 構成（日本語/英語の並びと文字数）だけを出す
+        let shape = segs.map { ($0.isEnglish ? "EN" : "JA") + "\($0.text.count)" }.joined(separator: "+")
+        itsLog.error("区間分割: \(shape, privacy: .public) skipSwitch=\(skipSwitch)")
 
         // 削除は必ず英数モードで行う。
         // 日本語IMEが有効なまま BS を撃つと、ことえりが不定個数を飲む
@@ -794,7 +823,7 @@ class KeyMonitor {
 
         if index == 0 {
             let carriedAfter = down.flatMap { unicodeChar(from: $0) } ?? "(なし)"
-            itsLog.error("注入開始 \(keys.count)文字 literal=\(asLiteral) 現IME=\(self.currentSourceID(), privacy: .public) 抱えていた文字=\(carriedBefore, privacy: .public) → 消去後=\(carriedAfter, privacy: .public)")
+            itsLog.error("注入開始 \(keys.count)文字 literal=\(asLiteral) 現IME=\(self.currentSourceID(), privacy: .public) 自動付与ユニコード=\(carriedBefore == "(なし)" ? "なし" : "あり", privacy: .public) → 消去後=\(carriedAfter == "(なし)" ? "なし" : "あり", privacy: .public)")
         }
 
         down?.post(tap: .cgSessionEventTap)
@@ -915,9 +944,9 @@ class KeyMonitor {
             //    曖昧辞書より先に試す: 日本語として1編集で直るなら日本語とみなす
             //    （tuski が tusk→task に食われる誤修正の防止）。
             //    修復後も分解できない列（checj 等）はここを素通りして 3) に届く
-            if repairsLeft > 0, let (fixed, desc) = repaired(chars, failAt: i, from: jaStart) {
+            if repairsLeft > 0, let (fixed, _) = repaired(chars, failAt: i, from: jaStart) {
                 repairsLeft -= 1
-                itsLog.error("タイポ修復: \(desc, privacy: .public)")
+                itsLog.error("タイポ修復あり")
                 chars = fixed
                 i = jaStart   // 修復で前のモーラ境界が変わりうるので走査し直す
                 continue
