@@ -32,11 +32,15 @@ struct MenuView: View {
             #if ITS_SELECTION
             Divider()
 
+            // 既存の「有効 (クリックで無効化)」と同じく、文言そのものが状態を語る形にする。
+            // チェックマークだけだと、出ないときに有効か無効か判断できない
             Button(action: { appState.selectionRescueEnabled.toggle() }) {
                 HStack {
                     Image(systemName: appState.selectionRescueEnabled ? "checkmark" : "")
                         .frame(width: 16)
-                    Text("選択したテキストも打ち直す")
+                    Text(appState.selectionRescueEnabled
+                         ? "選択したテキストも打ち直す: オン (クリックでオフ)"
+                         : "選択したテキストも打ち直す: オフ (クリックでオン)")
                 }
             }
             Text(selectionStatusText)
