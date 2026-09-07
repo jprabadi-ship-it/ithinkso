@@ -91,10 +91,11 @@ class KeyMonitor {
     // 新トリガー体系では 英数×2 = J→E。1度目を素通しすると未確定合成が
     // 確定してしまい F10 が効かなくなるため、1度目は飲み込んで保留し、
     // 2度目が来なければ後から注入し直す（単発押しの意図を壊さない）。
-    private var pendingEisu: CGEvent?
-    private var eisuReplayGen = 0
-    private let eisuReplayDelay = 0.5   // doubleTapWindow より長く
-    private let eisuFlushSettle = 0.12  // 英数を流してから文字を流すまでの待ち
+    // かな/英数のどちらか1つを保留する（同時に2つは持たない。次が来たら先に流す）
+    private var pendingHold: (keyCode: CGKeyCode, event: CGEvent)?
+    private var holdGen = 0
+    private let holdReplayDelay = 0.5   // doubleTapWindow より長く
+    private let holdFlushSettle = 0.12  // 保留キーを流してから文字を流すまでの待ち
     // ⌘単押しタップの状態（左⌘=E→J / 右⌘=J→E）
     private var lcmdDownTime: TimeInterval = 0
     private var rcmdDownTime: TimeInterval = 0
@@ -258,14 +259,14 @@ class KeyMonitor {
         // ⌘を押している最中のキー押下 = ⌘C などの修飾キー使用。タップ扱いにしない
         if lcmdDownTime > 0 || rcmdDownTime > 0 { cmdUsedAsModifier = true }
 
-        // 英数を保留したまま普通のキーが来た → 英数を先に注入してから
+        // かな/英数を保留したまま普通のキーが来た → 保留分を先に注入してから
         // このキーを注入し直す（順序を保つ）。修飾キー付きは触らず、
-        // 保留分はタイマーに任せる
-        if pendingEisu != nil, keyCode != eisuKeyCode,
+        // 保留分はタイマーに任せる。かな・英数自身は下の各ブランチで扱う
+        if pendingHold != nil, keyCode != eisuKeyCode, keyCode != kanaKeyCode,
            !event.flags.contains(.maskCommand),
            !event.flags.contains(.maskControl),
            !event.flags.contains(.maskAlternate) {
-            flushPendingEisu()
+            flushPendingKey()
             // 打たれた文字はバッファにも反映しておく（注入コピーは
             // synthetic タグ付きでこのタップを素通りするため）
             if let chars = unicodeChar(from: event), isBufferable(chars),
@@ -276,7 +277,7 @@ class KeyMonitor {
             // 日本語モードのまま入ってしまう（あbc になる）。間を置く
             if let copy = event.copy() {
                 copy.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
-                DispatchQueue.main.asyncAfter(deadline: .now() + eisuFlushSettle) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + holdFlushSettle) {
                     copy.post(tap: .cgAnnotatedSessionEventTap)
                 }
             }
@@ -308,8 +309,8 @@ class KeyMonitor {
                 fireJtoE(reason: "英数×2", snapshot: snapshot)
                 return nil
             }
-            // 窓の外の連打: 前の保留分を先に再生してから新しく保留し直す
-            flushPendingEisu()
+            // 窓の外の連打や、かなを保留中に英数が来た場合: 前の保留分を先に流す
+            flushPendingKey()
             eisuFirstTapTime = now
             eisuTapSnapshot = buffer
             eisuTapOverflowed = bufferOverflowed
@@ -319,7 +320,7 @@ class KeyMonitor {
             // 普通のモード切替として即座に効かせる（0.5秒待たせない）
             guard hadInput else { return Unmanaged.passRetained(event) }
             // 1度目: 素通しせず保留（未確定合成を確定させないため）
-            holdEisu(event)
+            holdKey(event, keyCode: eisuKeyCode)
             return nil
         }
 
@@ -333,12 +334,24 @@ class KeyMonitor {
                 fireEtoJ(reason: "かな×2", snapshot: snapshot, overflowed: kanaTapOverflowed)
                 return nil
             }
-            // 1度目: バッファを退避して素通し。日本語モードへの切替に
-            // なるだけで、後続の救済（削除→打ち直し）とは衝突しない
+            // 窓の外の連打や、英数を保留中にかなが来た場合: 前の保留分を先に流す
+            flushPendingKey()
             kanaFirstTapTime = now
             kanaTapSnapshot = buffer
             kanaTapOverflowed = bufferOverflowed
+            let hadInput = !buffer.isEmpty
             resetBuffer()
+            #if ITS_SELECTION
+            // バッファが空 = 選択を対象にしうる場面。ここでかなを素通しすると、
+            // ことえりが「選択中の文字列を再変換」してしまい（実測）、アプリが
+            // 読む前に選択を奪われる。選択対応をオンにしている人に限り保留する
+            if !hadInput && selectionRescueEnabled {
+                holdKey(event, keyCode: kanaKeyCode)
+                return nil
+            }
+            #endif
+            // 1度目: 素通し。打鍵直後なら日本語モードへの切替になるだけで、
+            // 後続の救済（削除→打ち直し）とは衝突しない
             return Unmanaged.passRetained(event)
         }
 
@@ -390,38 +403,40 @@ class KeyMonitor {
         bufferOverflowed = false
     }
 
-    // MARK: - 英数キーの保留再生
+    // MARK: - かな/英数キーの保留再生
 
-    private func holdEisu(_ event: CGEvent) {
-        pendingEisu = event.copy()
-        eisuReplayGen += 1
-        let gen = eisuReplayGen
-        DispatchQueue.main.asyncAfter(deadline: .now() + eisuReplayDelay) { [weak self] in
-            guard let self, self.eisuReplayGen == gen else { return }
-            self.flushPendingEisu()
+    private func holdKey(_ event: CGEvent, keyCode: CGKeyCode) {
+        flushPendingKey()   // 別のキーを保留中なら先に流し、常に1つだけ持つ
+        guard let copy = event.copy() else { return }
+        pendingHold = (keyCode: keyCode, event: copy)
+        holdGen += 1
+        let gen = holdGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdReplayDelay) { [weak self] in
+            guard let self, self.holdGen == gen else { return }
+            self.flushPendingKey()
         }
     }
 
-    /// 保留中の英数を今すぐ注入する（単発押しの成立）
-    private func flushPendingEisu() {
-        guard let down = pendingEisu else { return }
-        pendingEisu = nil
-        eisuReplayGen += 1
-        down.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
-        down.post(tap: .cgSessionEventTap)
+    /// 保留中のキーを今すぐ注入する（単発押しの成立）
+    private func flushPendingKey() {
+        guard let held = pendingHold else { return }
+        pendingHold = nil
+        holdGen += 1
+        held.event.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
+        held.event.post(tap: .cgSessionEventTap)
         if let src = CGEventSource(stateID: .hidSystemState),
-           let up = CGEvent(keyboardEventSource: src, virtualKey: eisuKeyCode, keyDown: false) {
+           let up = CGEvent(keyboardEventSource: src, virtualKey: held.keyCode, keyDown: false) {
             up.setIntegerValueField(.eventSourceUserData, value: syntheticUserData)
             up.post(tap: .cgSessionEventTap)
         }
     }
 
-    /// 保留中の英数を捨てる（2度押しが成立して救済が始まったとき）。
-    /// 破棄しないと、救済の最中や直後に synthetic タグ付きの英数が
-    /// タイマーから注入され、モードを壊す
-    private func discardPendingEisu() {
-        pendingEisu = nil
-        eisuReplayGen += 1
+    /// 保留中のキーを捨てる（2度押しが成立して救済が始まったとき）。
+    /// 破棄しないと、救済の最中や直後に synthetic タグ付きのキーが
+    /// タイマーから注入され、モードを壊したり選択を再変換したりする
+    private func discardPendingKey() {
+        pendingHold = nil
+        holdGen += 1
     }
 
     // MARK: - 救済
@@ -529,7 +544,7 @@ class KeyMonitor {
     private func fireEtoJ(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil,
                           overflowed: Bool? = nil) {
-        discardPendingEisu()
+        discardPendingKey()
         var saved = snapshot ?? buffer
         var over = overflowed ?? bufferOverflowed
         if snapshot == nil {
@@ -558,7 +573,7 @@ class KeyMonitor {
     /// ⌘タップにかなが載っている環境向けに、E→J と同じスナップショット救済を行う
     private func fireJtoE(reason: String,
                           snapshot: [(keyCode: CGKeyCode, char: String)]? = nil) {
-        discardPendingEisu()
+        discardPendingKey()
         var saved = snapshot ?? buffer
         if snapshot == nil {
             // ⌘タップに英数が載っている環境では、⌘1度目に付随する英数が
@@ -610,6 +625,7 @@ class KeyMonitor {
             return
         }
         guard !isRescuing else { return }
+        discardPendingKey()
         let targetPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         // AX の往復中にクリックやアプリ切替が起きても aliveRescue で弾けるよう、
         // 読む前に救済を立てておく。棄却する経路では必ず endRescue すること
