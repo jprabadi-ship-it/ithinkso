@@ -686,12 +686,20 @@ class KeyMonitor {
         guard cs.count <= maxSelectionCount else { return (nil, "長すぎる (\(cs.count)文字)") }
         // 小文字と長音の '-' だけ。大文字・数字・記号・空白・日本語は対象外
         guard cs.allSatisfy({ ($0 >= "a" && $0 <= "z") || $0 == "-" }) else {
-            let kinds = [
-                cs.contains { $0 == " " } ? "空白" : nil,
-                cs.contains { $0.isUppercase } ? "大文字" : nil,
-                cs.contains { $0.isNumber } ? "数字" : nil,
-                cs.contains { !$0.isASCII } ? "非ASCII" : nil,
-            ].compactMap { $0 }
+            var kinds: [String] = []
+            if cs.contains(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) { kinds.append("空白/改行") }
+            if cs.contains(where: { $0.isUppercase }) { kinds.append("大文字") }
+            if cs.contains(where: { $0.isNumber }) { kinds.append("数字") }
+            let nonASCII = cs.filter { !$0.isASCII }
+            if !nonASCII.isEmpty {
+                // 何が混ざったかを種類で示す（全角英字／ダッシュ類／かな／漢字…）。
+                // 判断材料としてコードポイントを3つまで残す。本文そのものは残さない
+                let cps = nonASCII.prefix(3).map { ch -> String in
+                    let v = ch.unicodeScalars.first!.value
+                    return String(format: "U+%04X", v)
+                }.joined(separator: " ")
+                kinds.append("非ASCII \(nonASCII.count)文字 例:\(cps)")
+            }
             return (nil, "対象外の文字を含む (\(kinds.isEmpty ? "記号" : kinds.joined(separator: "・")))")
         }
         let segs = segment(cs.map { String($0) })
@@ -715,6 +723,9 @@ class KeyMonitor {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
         let line = "\(f.string(from: Date())) \(app): \(result)"
         UserDefaults.standard.set(line, forKey: "ITSLastSelection")
+        var hist = UserDefaults.standard.stringArray(forKey: "ITSSelectionHistory") ?? []
+        hist.append(line)
+        UserDefaults.standard.set(Array(hist.suffix(5)), forKey: "ITSSelectionHistory")
         itsLog.error("選択救済: \(line, privacy: .public)")
     }
 
