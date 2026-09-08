@@ -29,7 +29,6 @@ cd "$W"
 xcodebuild -project IThinkSo.xcodeproj -scheme IThinkSo -configuration Release \
   -derivedDataPath "$W/dd" \
   ENABLE_APP_SANDBOX=NO ENABLE_HARDENED_RUNTIME=YES \
-  SWIFT_ACTIVE_COMPILATION_CONDITIONS="ITS_SELECTION" \
   CODE_SIGN_ENTITLEMENTS="IThinkSo/IThinkSo-DID.entitlements" \
   CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   CODE_SIGN_STYLE=Manual \
