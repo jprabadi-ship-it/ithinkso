@@ -681,6 +681,12 @@ class KeyMonitor {
     /// 受理判定。棄却理由も返す（サポート用。本文は含めない）
     static func selectionEvaluate(_ text: String)
         -> (accepted: (keys: [(keyCode: CGKeyCode, char: String)], segments: [Segment])?, reason: String) {
+        // TextEdit 等の「文頭を自動的に大文字にする」で先頭だけ大文字になる。
+        // 先頭1文字だけなら小文字に戻す（それ以外の大文字は英単語の可能性があるので棄却）
+        var text = text
+        if let f = text.first, f.isUppercase, text.dropFirst().allSatisfy({ !$0.isUppercase }) {
+            text = f.lowercased() + text.dropFirst()
+        }
         let cs = Array(text)
         guard cs.count >= 2 else { return (nil, "短すぎる (\(cs.count)文字)") }
         guard cs.count <= maxSelectionCount else { return (nil, "長すぎる (\(cs.count)文字)") }
@@ -1473,8 +1479,39 @@ enum SelectionReader {
 
         var value: CFTypeRef?
         let ve = AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &value)
-        guard ve == .success, let text = value as? String, !text.isEmpty else {
+        guard ve == .success, var text = value as? String, !text.isEmpty else {
             return .miss(ve == .success ? "選択が空" : "選択文字列が取れない (AXError \(ve.rawValue))")
+        }
+
+        // ⌘A で選ぶと末尾の改行が、ドラッグで選ぶと前後の空白が付いてくる。
+        // 文字列側で削ると、削除で改行ごと消えてしまう。選択範囲のほうを縮める
+        let scalars = Array(text.unicodeScalars)
+        let isWS: (Unicode.Scalar) -> Bool = { CharacterSet.whitespacesAndNewlines.contains($0) }
+        let lead  = scalars.prefix(while: isWS).count
+        let trail = scalars.reversed().prefix(while: isWS).count
+        if lead + trail > 0 {
+            guard lead + trail < scalars.count else { return .miss("選択が空白だけ") }
+            var rangeRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+                  let rv = rangeRef, CFGetTypeID(rv) == AXValueGetTypeID() else {
+                return .miss("前後の空白を外せない（選択範囲を読めない）")
+            }
+            var r = CFRange()
+            AXValueGetValue(rv as! AXValue, .cfRange, &r)
+            // AX の範囲は UTF-16 単位。空白・改行は1単位なので scalar 数と一致する
+            var nr = CFRange(location: r.location + lead, length: r.length - lead - trail)
+            guard let nv = AXValueCreate(.cfRange, &nr),
+                  AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, nv) == .success else {
+                return .miss("前後の空白を外せない（選択範囲を変更できない）")
+            }
+            // 縮めた結果を読み直して確かめる。ずれていたら消す対象が違うので中止
+            var again: CFTypeRef?
+            let trimmed = String(String.UnicodeScalarView(scalars[lead..<(scalars.count - trail)]))
+            guard AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &again) == .success,
+                  let t2 = again as? String, t2 == trimmed else {
+                return .miss("前後の空白を外した結果が一致しない")
+            }
+            text = trimmed
         }
 
         var pid: pid_t = 0
