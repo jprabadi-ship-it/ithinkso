@@ -693,8 +693,12 @@ class KeyMonitor {
         // 小文字と長音の '-' だけ。大文字・数字・記号・空白・日本語は対象外
         guard cs.allSatisfy({ ($0 >= "a" && $0 <= "z") || $0 == "-" }) else {
             var kinds: [String] = []
-            if cs.contains(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) { kinds.append("空白/改行") }
-            if cs.contains(where: { $0.isUppercase }) { kinds.append("大文字") }
+            // 前後の空白/改行は読み取り側で外してあるので、ここに残るのは中ほどのもの
+            // （= 複数行や複数語を選んでいる）
+            let ws = cs.filter { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }.count
+            if ws > 0 { kinds.append("中ほどの空白/改行 \(ws)個") }
+            let ups = cs.filter { $0.isUppercase }.count
+            if ups > 0 { kinds.append("大文字 \(ups)個（先頭だけなら吸収済み）") }
             if cs.contains(where: { $0.isNumber }) { kinds.append("数字") }
             let nonASCII = cs.filter { !$0.isASCII }
             if !nonASCII.isEmpty {
