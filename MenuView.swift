@@ -46,6 +46,12 @@ struct MenuView: View {
             Text(selectionStatusText)
                 .font(.caption)
                 .foregroundColor(.secondary)
+            if appState.selectionRescueEnabled,
+               let last = UserDefaults.standard.string(forKey: "ITSLastSelection") {
+                Text("前回の選択 \(last)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             if appState.selectionRescueEnabled && !appState.hasAXPermission {
                 Button("アクセシビリティの許可をリクエスト") {
                     appState.requestAXPermission()

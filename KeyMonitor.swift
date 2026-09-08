@@ -632,27 +632,32 @@ class KeyMonitor {
         beginRescue(budget: 3.0)
         let gen = rescueGen
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let hit = SelectionReader.read()
+            let outcome = SelectionReader.read()
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.aliveRescue(gen) else { return }
-                guard let hit else {
+                let hit: SelectionReader.Hit
+                switch outcome {
+                case .miss(let why):
                     self.endRescue()
-                    itsLog.error("\(reason, privacy: .public): 選択なし → 救済対象なし")
+                    self.noteSelectionResult("中止 — \(why)")
                     return
+                case .hit(let h):
+                    hit = h
                 }
                 guard hit.pid == targetPid,
                       NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPid else {
                     self.endRescue()
-                    itsLog.error("選択救済: 前面アプリが変わったため中止")
+                    self.noteSelectionResult("中止 — 前面アプリが変わった")
                     return
                 }
-                guard let accepted = Self.selectionKeys(hit.text) else {
+                let eval = Self.selectionEvaluate(hit.text)
+                guard let accepted = eval.accepted else {
                     self.endRescue()
-                    itsLog.error("選択救済: 受理せず (\(hit.text.count)文字)")
+                    self.noteSelectionResult("棄却 — \(eval.reason)")
                     return
                 }
-                itsLog.error("\(reason, privacy: .public) 検出 (選択=\(accepted.keys.count)文字) → E→J")
+                self.noteSelectionResult("実行 — \(eval.reason)")
                 // 選択があれば BS 1回で全部消える（実測）。文字数ぶん撃たない
                 self.triggerRescueToJapanese(accepted.keys, skipSwitch: false,
                                              deleteCount: 1, segments: accepted.segments)
@@ -670,22 +675,47 @@ class KeyMonitor {
     /// そのものかもしれない。一切の書き換えが起きなかった場合だけ通す
     static func selectionKeys(_ text: String)
         -> (keys: [(keyCode: CGKeyCode, char: String)], segments: [Segment])? {
+        selectionEvaluate(text).accepted
+    }
+
+    /// 受理判定。棄却理由も返す（サポート用。本文は含めない）
+    static func selectionEvaluate(_ text: String)
+        -> (accepted: (keys: [(keyCode: CGKeyCode, char: String)], segments: [Segment])?, reason: String) {
         let cs = Array(text)
-        guard cs.count >= 2, cs.count <= maxSelectionCount else { return nil }
+        guard cs.count >= 2 else { return (nil, "短すぎる (\(cs.count)文字)") }
+        guard cs.count <= maxSelectionCount else { return (nil, "長すぎる (\(cs.count)文字)") }
         // 小文字と長音の '-' だけ。大文字・数字・記号・空白・日本語は対象外
-        guard cs.allSatisfy({ ($0 >= "a" && $0 <= "z") || $0 == "-" }) else { return nil }
+        guard cs.allSatisfy({ ($0 >= "a" && $0 <= "z") || $0 == "-" }) else {
+            let kinds = [
+                cs.contains { $0 == " " } ? "空白" : nil,
+                cs.contains { $0.isUppercase } ? "大文字" : nil,
+                cs.contains { $0.isNumber } ? "数字" : nil,
+                cs.contains { !$0.isASCII } ? "非ASCII" : nil,
+            ].compactMap { $0 }
+            return (nil, "対象外の文字を含む (\(kinds.isEmpty ? "記号" : kinds.joined(separator: "・")))")
+        }
         let segs = segment(cs.map { String($0) })
-        guard segs.allSatisfy({ !$0.corrected }) else { return nil }          // 修復が走った
-        guard segs.map({ $0.text }).joined() == text else { return nil }       // 文字が増減した
+        guard segs.allSatisfy({ !$0.corrected }) else { return (nil, "綴りの修復が必要になる（英単語の可能性）") }
+        guard segs.map({ $0.text }).joined() == text else { return (nil, "分割で文字が増減する") }
         for seg in segs where seg.isEnglish {
-            guard englishWords.contains(seg.text) else { return nil }          // 未知クラスタ扱いされた
+            guard englishWords.contains(seg.text) else { return (nil, "ローマ字として読めない区間がある") }
         }
         let keys = cs.compactMap { c -> (keyCode: CGKeyCode, char: String)? in
             guard let kc = asciiKeyMap[c] else { return nil }
             return (keyCode: kc, char: String(c))
         }
-        guard keys.count == cs.count else { return nil }
-        return (keys, segs)
+        guard keys.count == cs.count else { return (nil, "キーコードに写せない文字がある") }
+        return ((keys, segs), "受理 (\(cs.count)文字)")
+    }
+
+    /// 直近の選択救済の結果を残す。メニューの「前回の選択」行と
+    /// `defaults read com.rabadi.ithinkso` から読める。本文は含めない
+    private func noteSelectionResult(_ result: String) {
+        let app = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        let line = "\(f.string(from: Date())) \(app): \(result)"
+        UserDefaults.standard.set(line, forKey: "ITSLastSelection")
+        itsLog.error("選択救済: \(line, privacy: .public)")
     }
 
     private func triggerRescueToJapanese(_ saved: [(keyCode: CGKeyCode, char: String)],
@@ -1394,37 +1424,51 @@ enum SelectionReader {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
+    enum Outcome {
+        case hit(Hit)
+        case miss(String)   // 取れなかった理由（サポート用。本文は含めない）
+    }
+
     /// 必ずバックグラウンドから呼ぶこと。
     /// イベントタップはメインランループで動いているので、メインで AX の同期 IPC を
     /// すると応答しない相手で既定6秒止まり、.tapDisabledByTimeout でタップごと止まる
-    static func read(timeout: Float = 0.25) -> Hit? {
-        guard AXIsProcessTrusted() else { return nil }
+    static func read(timeout: Float = 0.25) -> Outcome {
+        guard AXIsProcessTrusted() else { return .miss("アクセシビリティ未許可") }
         let sys = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sys, timeout)
 
         var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() else { return nil }
+        let fe = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &focused)
+        guard fe == .success, let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() else {
+            return .miss("フォーカス要素が取れない (AXError \(fe.rawValue))")
+        }
         let el = f as! AXUIElement
         AXUIElementSetMessagingTimeout(el, timeout)
+
+        var role: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
+        let roleName = (role as? String) ?? "?"
 
         // 編集できる場所だけを相手にする。Safari の本文や Mail の受信文、
         // ターミナルのスクロールバックは選択を読めても書けない。ここで確実に落とす
         var settable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable) == .success,
-              settable.boolValue else { return nil }
-
-        var role: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) == .success,
-              let r = role as? String, r == kAXTextAreaRole || r == kAXTextFieldRole else { return nil }
+        let se = AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable)
+        guard se == .success, settable.boolValue else {
+            return .miss("編集不可か選択を公開していない (role=\(roleName), AXError \(se.rawValue))")
+        }
+        guard roleName == kAXTextAreaRole || roleName == kAXTextFieldRole else {
+            return .miss("対象外の部品 (role=\(roleName))")
+        }
 
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &value) == .success,
-              let text = value as? String, !text.isEmpty else { return nil }
+        let ve = AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &value)
+        guard ve == .success, let text = value as? String, !text.isEmpty else {
+            return .miss(ve == .success ? "選択が空" : "選択文字列が取れない (AXError \(ve.rawValue))")
+        }
 
         var pid: pid_t = 0
         AXUIElementGetPid(el, &pid)
-        return Hit(text: text, pid: pid)
+        return .hit(Hit(text: text, pid: pid))
     }
 }
 #endif
