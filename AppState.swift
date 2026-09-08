@@ -59,6 +59,9 @@ class AppState: ObservableObject {
 
     func refreshAXStatus() {
         hasAXPermission = SelectionReader.isTrusted
+        // 最後に確認した状態を残す。サポート時に `defaults read com.rabadi.ithinkso`
+        // で、画面を見なくても権限の実状態が分かる
+        UserDefaults.standard.set(hasAXPermission, forKey: "ITSAXTrusted")
     }
 
     /// 未許可なら OS のダイアログを出し、付与されるまで1秒ごとに見る
@@ -114,6 +117,7 @@ class AppState: ObservableObject {
     func refreshPermissionStatus() {
         let wasGranted = hasInputPermission
         hasInputPermission = CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
+        UserDefaults.standard.set(hasInputPermission, forKey: "ITSInputPermission")
         #if ITS_SELECTION
         refreshAXStatus()
         #endif
