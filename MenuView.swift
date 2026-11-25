@@ -50,6 +50,10 @@ struct MenuView: View {
                 }
             }
 
+            Button("アップデートを確認…") {
+                GigowatUpdater.shared.checkNow(slug: "ithinkso")
+            }
+
             Button("終了") {
                 NSApplication.shared.terminate(nil)
             }
