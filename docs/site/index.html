@@ -248,6 +248,9 @@
   .dl-btn:hover { opacity: .9; }
   .dl-meta { margin-top: 10px; font-size: 13px; color: var(--muted); line-height: 1.7; }
 </style>
+<link rel="stylesheet" href="motion.css">
+<link rel="stylesheet" href="showcase.css">
+<link rel="stylesheet" href="it-show.css">
 </head>
 <body>
 <div class="wrap">
@@ -256,7 +259,7 @@
   <p class="home-link" style="margin:0 0 20px;font-size:14px"><a href="https://gigowat.com/#ithinkso">← gigowat のアプリ一覧</a></p>
   <div class="eyebrow">I think so — macOS</div>
   <h1>入力モードの打ち間違いを、<br>⌘2度押しで打ち直す</h1>
-  <div class="meta">最終更新 2026-09-08</div>
+  <div class="meta">最終更新 2026-11-26</div>
 </header>
 
 <p class="lede">
@@ -267,7 +270,7 @@
 
 <div class="download">
   <a class="dl-btn" href="https://github.com/jprabadi-ship-it/ithinkso/releases/latest">最新版をダウンロード</a>
-  <div class="dl-meta">バージョン 1.0.3 / 約1.3MB / macOS 13 以降<br>
+  <div class="dl-meta">バージョン 1.0.4 / 約1.3MB / macOS 13 以降<br>
   Apple 公証済み（Developer ID）。開いたら IThinkSo.app を Applications にドラッグしてください。</div>
 </div>
 
@@ -276,12 +279,62 @@
   <dl>
     <div class="row"><dt>収集する個人情報</dt><dd class="none">なし</dd></div>
     <div class="row"><dt>入力内容の保存</dt><dd class="none">なし</dd></div>
-    <div class="row"><dt>外部への送信</dt><dd class="none">なし</dd></div>
-    <div class="row"><dt>ネットワーク通信機能</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>入力内容の外部送信</dt><dd class="none">なし</dd></div>
+    <div class="row"><dt>ネットワーク通信</dt><dd class="none">更新の確認のみ</dd></div>
     <div class="row"><dt>第三者への提供</dt><dd class="none">なし</dd></div>
     <div class="row"><dt>広告・解析</dt><dd class="none">なし</dd></div>
   </dl>
 </div>
+
+<!-- sc:start -->
+<div class="sc it-bleed" aria-label="紹介" style="--sc-glow:#E0784E">
+<div class="it-hero" id="itHero">
+  <div class="it-hero-stage">
+    <div class="it-hero-title">
+      <h2>入力モードの打ち間違いを、<br>⌘2度押しで打ち直す</h2>
+      <p>英語モードのまま日本語を打ってしまったとき</p>
+    </div>
+    <div class="it-win" role="img" aria-label="sonocheckma-kuhadokomadegahannidesuka が、右⌘の2度押しで「そのcheckマークはどこまでが範囲ですか」に打ち直される">
+      <div class="it-bar"><i></i><i></i><i></i></div>
+      <div class="it-text wrong" data-from="sonocheckma-kuhadokomadegahannidesuka" data-to="そのcheckマークはどこまでが範囲ですか"></div>
+    </div>
+    <div class="it-keys" aria-hidden="true"><span class="it-key">右⌘</span><span class="it-key">右⌘</span></div>
+    <p class="it-note">文中の英単語はそのまま残ります。</p>
+  </div>
+</div>
+<div class="it-story">
+  <div class="it-story-bg" id="itStoryBg" aria-hidden="true">
+    <div class="it-scene on">
+      <div>
+        <div class="it-win"><div class="it-bar"><i></i><i></i><i></i></div><div class="it-text" data-from="ぎtこっみt" data-to="gitcommit">gitcommit</div></div>
+        <div class="it-keys"><span class="it-key">左⌘</span><span class="it-key">左⌘</span></div>
+      </div>
+    </div>
+    <div class="it-scene"><img src="shots/ja-menu.png" alt="" loading="lazy"></div>
+  </div>
+  <div class="sc-steps">
+    <div class="sc-step" data-i="0"><div class="sc-card">
+      <p class="sc-label">左⌘ を2回</p>
+      <h2>日本語モードのまま<br>英語を打ってしまったとき</h2>
+      <p>右⌘ を素早く2回押すと日本語に、左⌘ を2回押すと英語に打ち直します。</p>
+    </div></div>
+    <div class="sc-step" data-i="1"><div class="sc-card">
+      <p class="sc-label">メニューバー</p>
+      <h2>かな／英数の<br>2度押しでも</h2>
+      <p>JIS 配列なら かな/英数 の2度押しでも同じで、「かなにしたい」「英数にしたい」と同じ向きのキーを2回押す形です。</p>
+    </div></div>
+    <div class="sc-step" data-i="1"><div class="sc-card">
+      <p class="sc-label">データの取り扱い</p>
+      <h2>入力内容が外部に<br>送信されることはありません</h2>
+      <p>直近に打鍵された文字列を、打ち直しのためにメモリ上の一時バッファにのみ保持します。通信するのは新しい版の確認だけで、入力内容は送りません。</p>
+    </div></div>
+  </div>
+</div>
+<div class="sc-statement" id="scStatement">
+  <div class="sc-statement-stage"><p id="scStatementText">キーボード入力を監視しますが、その内容が端末の外に出ることはありません。</p></div>
+</div>
+</div>
+<!-- sc:end -->
 
 <section>
   <h2><span class="num">01</span>キーボード入力の取り扱い</h2>
@@ -291,9 +344,18 @@
   </p>
   <ul>
     <li>直近に打鍵された文字列を、打ち直しのために<strong>メモリ上の一時バッファ</strong>にのみ保持します</li>
-    <li>バッファはスペース・Enter・Escape・修飾キー操作のたびに<strong>破棄</strong>されます</li>
+    <li>バッファはスペース・Enter・Escape・修飾キー操作・マウスのクリック・アプリの切り替えのたびに<strong>破棄</strong>されます</li>
     <li>入力内容が<strong>ディスクに保存されることはありません</strong></li>
-    <li>入力内容が<strong>外部に送信されることはありません</strong>。本アプリにはネットワーク通信の機能自体がありません</li>
+    <li>入力内容が<strong>外部に送信されることはありません</strong></li>
+  </ul>
+
+  <h3>更新の確認</h3>
+  <p>本アプリが行う通信は、更新の確認だけです（バージョン 1.0.4 以降。それまでの版は通信を行いません）。</p>
+  <ul>
+    <li>起動の数秒後に、gigowat.com へ最新版の情報を<strong>1回</strong>問い合わせます。送るのはアプリ名だけで、入力内容・設定・利用状況は送りません</li>
+    <li>新しい版がある場合は、インストールするかを<strong>必ず確認</strong>します。同意した場合にだけ、GitHub から配布ファイルをダウンロードします</li>
+    <li>通常のインターネット通信と同じく、接続先（gigowat.com と GitHub）には接続元の IP アドレスが届きます</li>
+    <li>インターネットに接続していなくても、更新の確認以外の機能はすべて同じように動作します</li>
   </ul>
 </section>
 
@@ -329,7 +391,7 @@
   <h2><span class="num">04</span>よくある質問</h2>
   <ul>
     <li><strong>反応しない</strong><br>メニューバーのアイコンから権限が付与されているか確認してください。許可した直後はアプリの再起動が必要です</li>
-    <li><strong>かなキーがないキーボードを使っている</strong><br>JIS 配列の「かな」キー（キーコード 104）を使用します。US 配列の場合は Karabiner-Elements などで任意のキーに割り当ててください</li>
+    <li><strong>かなキーがないキーボードを使っている</strong><br>左右のコマンドキーの2度押しで操作できます（右⌘で日本語に、左⌘で英語に）。追加の設定は要りません</li>
     <li><strong>Caps Lock は使えなくなる？</strong><br>いいえ。Caps Lock には一切干渉しません</li>
   </ul>
 </section>
@@ -350,13 +412,20 @@
     feature it monitors keyboard input via the macOS Input Monitoring permission,
     but the most recent run of typed characters is held only in an in-memory
     buffer, is discarded on every Space / Return / Escape / modifier key press,
-    is never written to disk, and is never transmitted anywhere. The app contains
-    no networking capability. No data is shared with any third party.
+    is never written to disk, and is never transmitted anywhere. No data is shared
+    with any third party.
+  </p>
+  <p>
+    The only network activity is the update check (version 1.0.4 and later):
+    a few seconds after launch the app fetches the latest version information
+    from gigowat.com once, sending nothing but the app name. If a newer version
+    exists it asks before installing, and downloads the installer from GitHub
+    only if you agree. Typed text, settings and usage data are never sent.
   </p>
 
   <h3>Permissions</h3>
   <p>
-    <strong>Input Monitoring</strong> — to detect the kana-key double press and
+    <strong>Input Monitoring</strong> — to detect the Command-key double press and
     remember the characters you just typed.
     <strong>Accessibility</strong> — to post the keystrokes that perform the
     retype. Only the event-posting capability gated by this permission is used;
@@ -366,9 +435,9 @@
 
   <h3>How to use</h3>
   <p>
-    When you type in the wrong input mode, press the kana key twice quickly.
-    The text you just typed is deleted and retyped in the correct input mode.
-    The direction is detected automatically.
+    When you type in the wrong input mode, double-tap a Command key: the right
+    Command key retypes the text as Japanese, the left Command key restores it
+    as English. On JIS keyboards the kana / eisu keys work the same way.
   </p>
 
   <h3>Contact</h3>
@@ -381,5 +450,8 @@
 </footer>
 
 </div>
+<script src="motion.js" defer></script>
+<script src="showcase.js" defer></script>
+<script src="it-show.js" defer></script>
 </body>
 </html>
