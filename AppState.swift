@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 import CoreGraphics
 import Carbon
 import ServiceManagement
@@ -10,11 +11,18 @@ class AppState: ObservableObject {
     @Published var isEnabled: Bool = true {
         didSet {
             isEnabled ? keyMonitor.start() : keyMonitor.stop()
+            tapActive = keyMonitor.isTapActive
         }
     }
 
     /// 入力監視(ListenEvent) と イベント送出(PostEvent) の両方が揃っているか
     @Published var hasInputPermission: Bool = false
+    /// 「入力監視」(ListenEvent) が許可されているか
+    @Published var listenGranted: Bool = false
+    /// 「アクセシビリティ」の一覧に出る、イベント送出 (PostEvent) が許可されているか
+    @Published var postGranted: Bool = false
+    /// キー入力の監視が実際に動いているか
+    @Published var tapActive: Bool = false
 
     private var isUpdatingLaunchAtLogin = false
     @Published var launchAtLogin: Bool = false {
@@ -46,6 +54,15 @@ class AppState: ObservableObject {
         if canRun {
             keyMonitor.start()
         }
+        tapActive = keyMonitor.isTapActive
+
+        // 許可が欠けているときは、どこが欠けているかを最初に見せる。
+        // メニューの中だけに置くと、黙って動かないアプリになってしまう
+        if !hasInputPermission {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.showPermissionWindow()
+            }
+        }
 
         #if ITS_DEVTOOLS
         if SelfTest.isEnabled {
@@ -68,13 +85,16 @@ class AppState: ObservableObject {
 
     func refreshPermissionStatus() {
         let wasGranted = hasInputPermission
-        hasInputPermission = CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
+        listenGranted = CGPreflightListenEventAccess()
+        postGranted = CGPreflightPostEventAccess()
+        hasInputPermission = listenGranted && postGranted
         // 最後に確認した状態を残す。`defaults read com.rabadi.ithinkso` で
         // 画面を見なくても権限の実状態が分かる（サポート用）
         UserDefaults.standard.set(hasInputPermission, forKey: "ITSInputPermission")
         if hasInputPermission && !wasGranted && canRun {
             keyMonitor.start()
         }
+        tapActive = keyMonitor.isTapActive
     }
 
     func requestInputPermission() {
@@ -97,6 +117,95 @@ class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - 許可の状態の画面
+
+    enum PrivacyPane {
+        case inputMonitoring, accessibility
+        var url: URL {
+            switch self {
+            case .inputMonitoring:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
+            case .accessibility:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            }
+        }
+    }
+
+    private var permissionWindow: NSWindow?
+    private var windowRefreshTimer: Timer?
+
+    func showPermissionWindow() {
+        refreshPermissionStatus()
+        if permissionWindow == nil {
+            let w = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                styleMask: [.titled, .closable],
+                backing: .buffered, defer: false)
+            w.title = "I think so — 許可の状態"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: PermissionView().environmentObject(self))
+            w.center()
+            permissionWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        permissionWindow?.makeKeyAndOrderFront(nil)
+
+        // 開いている間は1秒ごとに見直す。設定でオンにした結果がその場で反映される
+        windowRefreshTimer?.invalidate()
+        windowRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor [weak self] in
+                guard let self, let w = self.permissionWindow, w.isVisible else {
+                    timer.invalidate(); return
+                }
+                self.refreshPermissionStatus()
+            }
+        }
+    }
+
+    func openPane(_ pane: PrivacyPane) {
+        NSWorkspace.shared.open(pane.url)
+    }
+
+    /// App Store 版（サンドボックス内）では tccutil を呼べない
+    var canResetPermissions: Bool {
+        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] == nil
+    }
+
+    /// この Mac での I think so の許可だけを消して、求め直す。
+    /// 設定画面ではオンに見えるのに、裏でイベント送出が「拒否」のまま残ることがある
+    /// （イベント送出は「アクセシビリティ」の一覧に一緒に出るため、画面では見分けられない）。
+    /// 消してから求め直すと、記録が新しく作り直される
+    func resetPermissions() {
+        guard canResetPermissions else { return }
+        let id = Bundle.main.bundleIdentifier ?? "com.rabadi.ithinkso"
+        for service in ["ListenEvent", "PostEvent", "Accessibility"] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            p.arguments = ["reset", service, id]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do {
+                try p.run()
+                p.waitUntilExit()
+                itsLog.error("tccutil reset \(service, privacy: .public) → \(p.terminationStatus)")
+            } catch {
+                itsLog.error("tccutil reset \(service, privacy: .public) を起動できない: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        refreshPermissionStatus()
+        requestInputPermission()
+    }
+
+    /// 自分を起動し直す。許可は起動中のプロセスに反映されないことがある
+    func relaunch() {
+        let path = Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     /// 権限画面を開く。付与後に再起動が要るケースがあるため導線として用意する

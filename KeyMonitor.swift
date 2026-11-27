@@ -101,6 +101,8 @@ class KeyMonitor {
     /// 自分が注入した合成イベントを識別するタグ ("ITS" in hex)
     private let syntheticUserData: Int64 = 0x49545300
     private var eventTap: CFMachPort?
+    /// キー入力の監視が実際に動いているか（許可の画面で表示する）
+    var isTapActive: Bool { eventTap != nil }
     private var runLoopSource: CFRunLoopSource?
 
     var rescueThresholdPublic: Int { rescueThreshold }
