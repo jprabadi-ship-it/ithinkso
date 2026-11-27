@@ -58,9 +58,13 @@ class AppState: ObservableObject {
 
         // 許可が欠けているときは、どこが欠けているかを最初に見せる。
         // メニューの中だけに置くと、黙って動かないアプリになってしまう
+        let requestNow = UserDefaults.standard.bool(forKey: Self.requestOnLaunchKey)
+        UserDefaults.standard.removeObject(forKey: Self.requestOnLaunchKey)
         if !hasInputPermission {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.showPermissionWindow()
+                // 「許可をリセットしてやり直す」で起動し直したときは、そのまま求める
+                if requestNow { self?.requestInputPermission() }
             }
         }
 
@@ -194,9 +198,14 @@ class AppState: ObservableObject {
                 itsLog.error("tccutil reset \(service, privacy: .public) を起動できない: \(error.localizedDescription, privacy: .public)")
             }
         }
-        refreshPermissionStatus()
-        requestInputPermission()
+        // 起動中のプロセスは消す前の許可を覚えたままで、求め直しても何も出ない（実測）。
+        // 起動し直して、新しいプロセスのほうで許可を求める
+        UserDefaults.standard.set(true, forKey: Self.requestOnLaunchKey)
+        UserDefaults.standard.synchronize()
+        relaunch()
     }
+
+    private static let requestOnLaunchKey = "ITSRequestPermissionOnLaunch"
 
     /// 自分を起動し直す。許可は起動中のプロセスに反映されないことがある
     func relaunch() {

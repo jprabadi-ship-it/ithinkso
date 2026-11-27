@@ -101,7 +101,7 @@ struct PermissionView: View {
                 Spacer()
                 if appState.canResetPermissions {
                     Button("許可をリセットしてやり直す") { appState.resetPermissions() }
-                        .help("設定ではオンなのに ✗ のままのときに使います。I think so の許可だけを消して、求め直します")
+                        .help("設定ではオンなのに ✗ のままのときに使います。I think so の許可だけを消し、起動し直して求め直します")
                 }
             }
         }
