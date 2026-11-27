@@ -103,8 +103,30 @@ class AppState: ObservableObject {
 
     func requestInputPermission() {
         if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
-        if !CGPreflightPostEventAccess()   { _ = CGRequestPostEventAccess() }
+        if !CGPreflightPostEventAccess()   {
+            _ = CGRequestPostEventAccess()
+            // PostEvent を求めるだけでは、システム設定の「アクセシビリティ」の一覧に
+            // 載らない（リセット後に実測）。一覧の項目はアクセシビリティの記録から
+            // 作られるので、それも求めて項目を出す。オンにすると PostEvent も一緒に許可される
+            promptAccessibilityListing()
+        }
         startPollingForPermission()
+    }
+
+    /// AXIsProcessTrustedWithOptions(prompt: true) を呼ぶ。
+    /// App Store 版では AX の記号を持たないこと（submit.sh が検査）を守るため、
+    /// 直接はリンクせず実行時に引く。サンドボックス内では呼ばない
+    private func promptAccessibilityListing() {
+        guard canResetPermissions else { return }
+        typealias Fn = @convention(c) (CFDictionary?) -> DarwinBoolean
+        guard let handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY),
+              let sym = dlsym(handle, "AXIsProcessTrustedWithOptions") else {
+            itsLog.error("AXIsProcessTrustedWithOptions を引けない")
+            return
+        }
+        let fn = unsafeBitCast(sym, to: Fn.self)
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        _ = fn(options)
     }
 
     private func startPollingForPermission() {
